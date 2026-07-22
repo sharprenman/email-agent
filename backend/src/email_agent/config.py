@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     service_auth_token: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = Field(default=None, max_length=2048)
+    google_client_id: str | None = Field(default=None, max_length=512)
+    google_client_secret: SecretStr | None = None
+    google_access_token: SecretStr | None = None
+    google_refresh_token: SecretStr | None = None
+    microsoft_tenant_id: str = Field(default="common", min_length=1, max_length=128)
+    microsoft_client_id: str | None = Field(default=None, max_length=128)
+    microsoft_client_secret: SecretStr | None = None
+    microsoft_access_token: SecretStr | None = None
+    microsoft_refresh_token: SecretStr | None = None
     model: str = Field(default="openai/gpt-5.1", min_length=1, max_length=255)
     provider_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     max_request_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)

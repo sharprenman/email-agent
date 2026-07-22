@@ -633,3 +633,20 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 - 生产环境缺少服务间认证配置时会快速失败，配置对象不会在字符串输出中暴露敏感值。
 - 首期单用户通过统一 `AuthContext` 进入应用状态，为后续多用户认证和 StoreBackend namespace 保留稳定边界。
 - 模型仍严格使用项目已验证的 `dotenv.load_dotenv()` 与 `init_chat_model` 构造方式。
+
+### 第 6 步：代码与自动化验证已完成（真实 OAuth 联调待外部条件）
+
+- 已用单个 `gmail.py` 实现 Gmail 身份、收件箱、搜索、正文、已发送、未回复、附件元数据、People 联系人、发信/回复和标记已读能力。
+- 读取请求使用有限重试并支持分页；写请求禁用客户端自动重试、要求幂等键，持久化幂等和审批仍由后续服务层负责。
+- 已实现配置化 HTTP 超时、OAuth 凭证刷新、Google 错误到统一 Provider 异常的映射，以及响应到领域 DTO 的转换。
+- 已用 Fake Google Service 验证成功、空结果、分页、凭证失效、权限不足、资源不存在、限流、超时和服务异常，共有 28 项后端测试通过。
+- 真实 Gmail/People API 端到端验证需要项目专用 Google Cloud OAuth 应用和测试邮箱；在这些外部条件就绪前不把 Mock 测试表述为真实联调。
+
+### 第 7 步：代码与自动化验证已完成（真实 Entra 联调待外部条件）
+
+- 已用单个 `outlook.py` 实现 Microsoft OAuth token 刷新，以及身份、收件箱、搜索、正文、已发送、未回复、附件元数据、联系人、发信/回复和标记已读能力。
+- Graph 列表严格沿用完整 `@odata.nextLink` 分页；读取请求有限重试，写请求不自动重试，401 刷新 token 后只重放一次未通过认证的请求。
+- 新邮件通过“创建草稿后发送”返回稳定草稿 ID；回复通过 `createReply` 保留 Outlook 会话关系。两类写操作均要求幂等键，持久化幂等和审批继续由后续服务层负责。
+- Outlook 能力明确设置 `unsubscribe_headers=False`，附件仅提供元数据，不虚构原项目尚未具备的退订工具链和附件正文提取能力。
+- 已用 Mock Graph 验证分页、空结果、token 轮换、读取重试、写操作不重试、权限/限流/超时/服务异常和统一 Provider 合约；当前共有 43 项后端测试通过。
+- 真实 Microsoft Graph 端到端验证需要项目专用 Entra 应用、委托权限、refresh token 和测试邮箱；条件就绪前不把 Mock 测试表述为真实联调。

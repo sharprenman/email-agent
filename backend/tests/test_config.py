@@ -13,11 +13,20 @@ from email_agent.main import create_app
 
 def test_secret_values_are_masked() -> None:
     """敏感配置不能通过对象字符串意外泄漏。"""
-    settings = Settings(openai_api_key="test-secret", service_auth_token="service-secret")
+    settings = Settings(
+        openai_api_key="test-secret",
+        service_auth_token="service-secret",
+        microsoft_client_secret="microsoft-secret",
+        microsoft_access_token="microsoft-access-token",
+        microsoft_refresh_token="microsoft-refresh-token",
+    )
 
     rendered = repr(settings)
     assert "test-secret" not in rendered
     assert "service-secret" not in rendered
+    assert "microsoft-secret" not in rendered
+    assert "microsoft-access-token" not in rendered
+    assert "microsoft-refresh-token" not in rendered
     assert "**********" in rendered
 
 
