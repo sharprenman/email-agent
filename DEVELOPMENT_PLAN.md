@@ -650,3 +650,14 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 - Outlook 能力明确设置 `unsubscribe_headers=False`，附件仅提供元数据，不虚构原项目尚未具备的退订工具链和附件正文提取能力。
 - 已用 Mock Graph 验证分页、空结果、token 轮换、读取重试、写操作不重试、权限/限流/超时/服务异常和统一 Provider 合约；当前共有 43 项后端测试通过。
 - 真实 Microsoft Graph 端到端验证需要项目专用 Entra 应用、委托权限、refresh token 和测试邮箱；条件就绪前不把 Mock 测试表述为真实联调。
+
+### 第 8 步：代码与自动化验证已完成（真实日历联调待外部条件）
+
+- 已用单个 `calendar.py` 实现 Google Calendar 与 Microsoft Calendar 的时间窗口查询、分页、创建、更新、删除和受限重复规则映射。
+- 已增加 IANA 时区、时间范围、参与者邮箱、重复频率、重复星期和结束条件的确定性校验；查询窗口最多 366 天。
+- 所有日历写操作默认拒绝，必须提供由 DeepAgents interrupt 恢复层签发的一次性审批凭证；凭证绑定可信用户、操作、目标事件、完整请求内容和幂等键，过期、篡改、错用或重复消费都会在调用外部 API 前失败。
+- 新实现不复制原项目“headless 无审批渠道时直接放行”以及 Outlook 日历未挂审批插件的行为；Google 与 Microsoft 写操作采用同一保护规则。
+- Google 创建事件使用幂等事件 ID，Microsoft 创建事件使用 `transactionId`；供应商写请求均不自动重试，避免网络重放产生重复副作用。
+- 当前一次性消费记录是单进程内存实现，满足首期单用户私有部署；扩展为多实例服务前必须在 PostgreSQL 持久化步骤中替换为带唯一约束的共享消费记录。
+- 已用 Fake Google Calendar 与 Fake Graph 验证分页、字段映射、重复规则、错误映射、缺失审批、内容篡改、审批过期和重复恢复；当前共有 54 项后端测试通过。
+- 真实端到端验证仍需要 Google Calendar scope、Microsoft `Calendars.ReadWrite` 委托权限及对应测试账号。

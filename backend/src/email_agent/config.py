@@ -33,6 +33,7 @@ class Settings(BaseSettings):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@+-]*$",
     )
     service_auth_token: SecretStr | None = None
+    approval_signing_secret: SecretStr | None = Field(default=None, min_length=32)
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = Field(default=None, max_length=2048)
     google_client_id: str | None = Field(default=None, max_length=512)
@@ -52,8 +53,14 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
         """生产环境必须配置服务间认证。"""
-        if self.app_env is AppEnvironment.PRODUCTION and self.service_auth_token is None:
-            raise ValueError("生产环境必须配置 SERVICE_AUTH_TOKEN")
+        missing: list[str] = []
+        if self.app_env is AppEnvironment.PRODUCTION:
+            if self.service_auth_token is None:
+                missing.append("SERVICE_AUTH_TOKEN")
+            if self.approval_signing_secret is None:
+                missing.append("APPROVAL_SIGNING_SECRET")
+        if missing:
+            raise ValueError("生产环境必须配置：" + ", ".join(missing))
         return self
 
 

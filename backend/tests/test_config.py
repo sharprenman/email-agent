@@ -16,6 +16,7 @@ def test_secret_values_are_masked() -> None:
     settings = Settings(
         openai_api_key="test-secret",
         service_auth_token="service-secret",
+        approval_signing_secret="approval-signing-secret-32-bytes-long",
         microsoft_client_secret="microsoft-secret",
         microsoft_access_token="microsoft-access-token",
         microsoft_refresh_token="microsoft-refresh-token",
@@ -24,6 +25,7 @@ def test_secret_values_are_masked() -> None:
     rendered = repr(settings)
     assert "test-secret" not in rendered
     assert "service-secret" not in rendered
+    assert "approval-signing-secret-32-bytes-long" not in rendered
     assert "microsoft-secret" not in rendered
     assert "microsoft-access-token" not in rendered
     assert "microsoft-refresh-token" not in rendered

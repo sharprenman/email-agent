@@ -1,11 +1,12 @@
 """邮件与日历 Provider 共用的领域契约。"""
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ContractModel(BaseModel):
@@ -88,6 +89,48 @@ class SendEmailRequest(ContractModel):
     reply_to_email_id: str | None = Field(default=None, max_length=512)
 
 
+class RecurrenceFrequency(StrEnum):
+    """首期支持的日历重复频率。"""
+
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+    YEARLY = "yearly"
+
+
+class RecurrenceWeekday(StrEnum):
+    """跨 Google 与 Microsoft 的统一星期枚举。"""
+
+    MONDAY = "monday"
+    TUESDAY = "tuesday"
+    WEDNESDAY = "wednesday"
+    THURSDAY = "thursday"
+    FRIDAY = "friday"
+    SATURDAY = "saturday"
+    SUNDAY = "sunday"
+
+
+class CalendarRecurrence(ContractModel):
+    """受限且可映射到两个日历供应商的重复规则。"""
+
+    frequency: RecurrenceFrequency
+    interval: int = Field(default=1, ge=1, le=99)
+    count: int | None = Field(default=None, ge=1, le=999)
+    until: date | None = None
+    weekdays: tuple[RecurrenceWeekday, ...] = Field(default=(), max_length=7)
+
+    @model_validator(mode="after")
+    def validate_recurrence(self) -> "CalendarRecurrence":
+        """限制结束条件和仅适用于每周重复的星期参数。"""
+        if self.count is not None and self.until is not None:
+            raise ValueError("重复规则的 count 和 until 不能同时设置")
+        if self.weekdays and self.frequency is not RecurrenceFrequency.WEEKLY:
+            raise ValueError("只有 weekly 重复规则可以设置 weekdays")
+        if len(set(self.weekdays)) != len(self.weekdays):
+            raise ValueError("重复规则的 weekdays 不能重复")
+        return self
+
+
 class CalendarEventInput(ContractModel):
     """创建或修改日历事件的输入。"""
 
@@ -98,6 +141,38 @@ class CalendarEventInput(ContractModel):
     attendees: tuple[str, ...] = Field(default=(), max_length=500)
     location: str | None = Field(default=None, max_length=1000)
     description: str | None = Field(default=None, max_length=20_000)
+    recurrence: CalendarRecurrence | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        """要求使用可由服务端解析的 IANA 时区。"""
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("timezone 必须是有效的 IANA 时区") from exc
+        return value
+
+    @field_validator("attendees")
+    @classmethod
+    def validate_attendees(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        """拒绝重复或明显无效的参与者邮箱。"""
+        normalized = tuple(value.casefold() for value in values)
+        if len(set(normalized)) != len(values):
+            raise ValueError("attendees 不能包含重复邮箱")
+        for value in values:
+            local, separator, domain = value.partition("@")
+            if (
+                not separator
+                or not local
+                or not domain
+                or "@" in domain
+                or len(local) > 64
+                or len(domain) > 255
+                or any(character.isspace() for character in value)
+            ):
+                raise ValueError("attendees 必须是有效邮箱地址")
+        return values
 
     @model_validator(mode="after")
     def validate_time_range(self) -> "CalendarEventInput":
@@ -106,6 +181,10 @@ class CalendarEventInput(ContractModel):
             raise ValueError("日历事件时间必须包含时区")
         if self.end_at <= self.start_at:
             raise ValueError("日历事件结束时间必须晚于开始时间")
+        if self.recurrence and self.recurrence.until:
+            local_start = self.start_at.astimezone(ZoneInfo(self.timezone)).date()
+            if self.recurrence.until < local_start:
+                raise ValueError("重复规则结束日期不能早于事件开始日期")
         return self
 
 
@@ -218,6 +297,8 @@ class CalendarProvider(Protocol):
         self,
         event: CalendarEventInput,
         *,
+        user_id: str,
+        approval_token: str,
         idempotency_key: str,
     ) -> CalendarEvent: ...
 
@@ -226,7 +307,16 @@ class CalendarProvider(Protocol):
         event_id: str,
         event: CalendarEventInput,
         *,
+        user_id: str,
+        approval_token: str,
         idempotency_key: str,
     ) -> CalendarEvent: ...
 
-    async def delete_event(self, event_id: str, *, idempotency_key: str) -> None: ...
+    async def delete_event(
+        self,
+        event_id: str,
+        *,
+        user_id: str,
+        approval_token: str,
+        idempotency_key: str,
+    ) -> None: ...
