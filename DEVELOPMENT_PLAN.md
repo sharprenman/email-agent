@@ -1,0 +1,635 @@
+# DeepAgents Email 企业级后端复刻开发方案
+
+## 1. 文档目标
+
+本文档用于指导在 `deepAgents_email/` 中复刻 `9900-H16C-Cake/` 的邮件 Agent 后端，并在后端完成后复制原 Next.js 前端、进行必要的协议适配和前后端联调。
+
+本阶段只输出开发方案，不实施代码迁移、依赖安装、前端复制或业务开发。
+
+## 2. 已确认范围
+
+- 原项目：`9900-H16C-Cake/`
+- 目标目录：`deepAgents_email/`
+- 后端：使用 Python + DeepAgents 重新开发，不复制原 ConnectOnion 编排实现。
+- 前端：后续复制 `9900-H16C-Cake/oo-chat/`，保留页面和交互，只修改必要的连接层代码。
+- 联调：覆盖多轮会话、工具调用、人工审批、异常反馈和会话恢复。
+- 邮件能力：Gmail 与 Outlook 同期开发，使用相同领域接口，并明确两者由上游 API 决定的能力差异。
+- 交付标准：可测试、可观测、可部署、可审计、可回滚，不以“本机能运行”作为完成标准。
+- 部署模式：首期为单用户私有部署，但身份、凭证、线程和记忆边界按可扩展为多用户服务的方式设计。
+- 产品入口：优先交付 Web/API，不把 CLI 作为首期阻塞项。
+- 数据库：自建 PostgreSQL；开发环境通过容器提供，生产部署保留独立配置能力。
+- 审批策略：所有产生外部副作用的操作默认要求人工审批。
+- 代码语言约定：项目自有的 Python docstring、多行 Prompt、模块说明和面向用户文本尽量使用中文；代码标识符、API 字段、标准协议值和第三方库固定文本保持其规范语言。
+
+## 3. 原项目运行逻辑
+
+原后端的主要执行链如下：
+
+```text
+用户输入
+  -> 意图识别（直接回复或进入执行）
+  -> 串行 Planner（生成 skill/agent 步骤和 reads 依赖）
+  -> Skill 参数解析与 schema 校验
+  -> Python Skill 或通用 ReAct Agent 执行
+  -> Finalizer 汇总结构化步骤结果
+  -> USER_PROFILE / USER_HABITS / WRITING_STYLE 记忆回写
+  -> 返回响应并延续 session
+```
+
+外部能力包括：
+
+- Gmail/Outlook 邮件读取、搜索、正文、附件、发信和未回复邮件查询。
+- Google/Microsoft Calendar 查询与事件写入。
+- CRM 联系人初始化及 Gmail 发信后的联系人同步。
+- 周报、紧急邮件、Bug 邮件、候选人简历、回复草稿、成品邮件发送、退订发现、退订执行、写作风格画像等工作流。
+- CLI、HTTP Agent 服务、Next.js 聊天页面和 Docker Compose 部署。
+
+## 4. 复刻策略与取舍
+
+### 4.1 推荐策略：功能等价，不做内部代码一比一翻译
+
+DeepAgents 已提供任务规划、Todo、子代理、Skills、上下文压缩、Checkpointer、持久化 Backend 和人工审批。新项目不再复制原来的 `IntentLayerOrchestrator`、YAML Planner、Skill Resolver 和 Finalizer 基础设施，否则会同时维护两套规划系统，增加模型调用次数、故障面和测试成本。
+
+新执行链建议为：
+
+```text
+FastAPI 请求
+  -> 身份、限流和请求校验
+  -> DeepAgents 主 Agent
+       -> Todo 规划
+       -> 按需读取 Skill
+       -> 委派只读邮件、邮件写入、日历等子代理
+       -> 调用确定性业务工具
+       -> 遇到副作用操作时 interrupt
+  -> Checkpointer 保存线程状态
+  -> StoreBackend 保存用户长期记忆
+  -> 统一 API 响应或 SSE 事件
+```
+
+### 4.2 保留确定性代码的边界
+
+下列逻辑不能只写在 Prompt 或 `SKILL.md` 中：
+
+- OAuth token 管理和刷新。
+- 邮件供应商 API 调用、超时、错误映射和重试策略。
+- 退订头解析、RFC 8058 请求和 mailto 执行。
+- 写操作审批、权限校验和幂等控制。
+- 附件类型、大小及文本提取安全限制。
+- 用户、线程和长期记忆的数据隔离。
+- API 请求校验、错误码、日志脱敏和审计记录。
+
+DeepAgents Skill 负责告诉 Agent “何时以及如何组合工具”，Python Service/Tool 负责安全地完成实际动作。
+
+### 4.3 前端复制策略
+
+可以复制原前端，但不能保证完全零修改。原 `oo-chat/app/api/chat/route.ts` 面向 ConnectOnion 的 `/info`、`/input` 和 Ed25519 签名协议。新后端采用版本化 HTTP/SSE 契约，因此只保留 UI、状态管理和审批组件，对以下位置做手术式调整：
+
+- `app/api/chat/route.ts`：转发至新后端 `/api/v1/chat` 或流式端点。
+- 会话状态：从原 `agentSession` 切换为后端 `thread_id`。
+- 审批交互：把 DeepAgents interrupt 转换成现有审批卡片可识别的事件。
+- 环境变量：统一为服务端后端地址和服务间凭证，浏览器不接触邮件 token 或后端密钥。
+
+不建议为了前端零修改而重新实现 ConnectOnion 私有传输协议；这会引入与核心邮件功能无关的维护成本。
+
+## 5. 目标架构
+
+```text
+Next.js UI
+  -> Next.js server-side API proxy
+    -> FastAPI /api/v1
+      -> API Router / Schema / Exception Handler
+      -> ChatApplicationService
+        -> DeepAgents Supervisor
+          -> Mailbox Reader Subagent（只读）
+          -> Mail Writer Subagent（写操作需审批）
+          -> Calendar Subagent（写操作需审批）
+          -> Memory/Profile 能力
+          -> DeepAgents Skills
+        -> Provider Ports
+          -> Gmail Adapter
+          -> Outlook Adapter
+          -> Google Calendar Adapter
+          -> Microsoft Calendar Adapter
+      -> LangGraph Checkpointer（线程状态）
+      -> StoreBackend（用户长期记忆）
+      -> Audit/Observability
+```
+
+### 5.1 建议目录
+
+```text
+deepAgents_email/
+├── backend/
+│   ├── pyproject.toml
+│   ├── src/email_agent/
+│   │   ├── main.py
+│   │   ├── api/
+│   │   │   ├── routers/
+│   │   │   ├── schemas/
+│   │   │   ├── dependencies.py
+│   │   │   └── exception_handlers.py
+│   │   ├── agents/
+│   │   │   ├── supervisor.py
+│   │   │   ├── mailbox_reader.py
+│   │   │   ├── mail_writer.py
+│   │   │   └── calendar_agent.py
+│   │   ├── skills/
+│   │   │   └── <skill-name>/SKILL.md
+│   │   ├── tools/
+│   │   ├── services/
+│   │   ├── domain/
+│   │   ├── providers/
+│   │   │   ├── gmail/
+│   │   │   ├── outlook/
+│   │   │   ├── google_calendar/
+│   │   │   └── microsoft_calendar/
+│   │   ├── persistence/
+│   │   ├── security/
+│   │   ├── observability/
+│   │   └── core/
+│   └── tests/
+│       ├── unit/
+│       ├── integration/
+│       ├── contract/
+│       └── evaluation/
+├── frontend/                 # 后续从 oo-chat 复制
+├── deploy/
+├── scripts/
+├── .env.example
+├── docker-compose.yml
+├── DEVELOPMENT_PLAN.md
+└── README.md
+```
+
+目录以职责分层，不为单次使用的代码创建无意义抽象。具体文件只有在对应步骤开始开发时才创建。
+
+## 6. 核心技术决策
+
+| 领域 | 决策 | 原因 |
+|---|---|---|
+| Web 框架 | FastAPI + Pydantic | 明确 API 契约、异步支持、OpenAPI 和依赖注入 |
+| Agent 框架 | DeepAgents `create_deep_agent` | 原生规划、Skills、子代理、文件系统和 HITL |
+| 模型初始化 | `load_dotenv()` + `init_chat_model(f"openai:{raw_model}", use_responses_api=False)` | 适配当前 OpenAI 兼容服务的已验证调用方式，禁止擅自改写模型标识 |
+| 会话状态 | LangGraph Checkpointer + `thread_id` | 支持多轮会话、interrupt 与恢复 |
+| 长期记忆 | DeepAgents `CompositeBackend`，`/memories/` 路由至用户级 StoreBackend | 跨线程持久化并防止用户间泄漏 |
+| 本地持久化 | Docker Compose 自建 PostgreSQL | 尽早验证与生产一致的会话、审批和记忆持久化行为 |
+| 生产持久化 | 自建 PostgreSQL Checkpointer/Store | 支持可靠持久化、备份和多实例部署 |
+| 邮件接入 | Provider Port + Gmail/Outlook Adapter | 统一领域能力，同时允许供应商差异 |
+| 副作用安全 | DeepAgents `interrupt_on` + 服务层二次校验 + 幂等键 | Prompt 不是安全边界 |
+| 接口协议 | `/api/v1` JSON；聊天提供同步接口及 SSE 流式接口 | 便于前端代理、调试和演进 |
+| 配置 | Pydantic Settings + 环境变量 | 类型校验，禁止硬编码密钥 |
+| 质量工具 | pytest、pytest-asyncio、ruff、mypy、覆盖率、依赖安全扫描 | 建立自动化质量门禁 |
+| 部署 | Docker Compose 开发环境；容器化生产配置 | 与原项目使用方式接近且便于联调 |
+
+DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直接使用无限制的最新版范围。
+
+## 7. 初始 API 契约
+
+最终字段以接口设计评审结果为准，初始边界如下：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/health/live` | 进程存活检查，不访问外部服务 |
+| GET | `/health/ready` | 检查配置、持久化和必要依赖是否可用 |
+| POST | `/api/v1/chat` | 同步聊天及多轮线程调用 |
+| POST | `/api/v1/chat/stream` | SSE 输出模型、工具、审批和完成事件 |
+| POST | `/api/v1/threads/{thread_id}/resume` | 提交 approve/edit/reject，恢复 interrupt |
+| GET | `/api/v1/threads/{thread_id}` | 查询当前线程的可公开状态 |
+| DELETE | `/api/v1/threads/{thread_id}` | 按权限清理线程数据 |
+
+聊天请求至少包含：
+
+- `message`：长度受限的用户消息。
+- `thread_id`：可选；首次由服务端生成，后续复用。
+- `attachments`：可选；必须使用受控文件 ID，不能接受任意服务器路径。
+- `idempotency_key`：写操作恢复或网络重试时使用。
+
+身份必须从可信认证信息中解析，不能相信请求正文传入的 `user_id`。响应使用统一错误结构，不返回堆栈、模型密钥、OAuth token、服务器路径或完整敏感邮件内容。
+
+## 8. 人工审批与权限矩阵
+
+| 操作 | 默认策略 |
+|---|---|
+| 搜索、读取邮件和附件元数据 | 无审批，受用户邮箱权限约束 |
+| 读取附件正文 | 无交互审批，但执行文件类型、大小和解析器白名单 |
+| 生成回复草稿 | 无审批，不产生外部副作用 |
+| 发送邮件/回复邮件 | 必须审批，展示收件人、主题、正文和附件摘要 |
+| 创建、修改、删除日历事件 | 必须审批，删除操作显著标识 |
+| RFC 8058 或 mailto 退订 | 必须审批，并逐个展示目标与执行方式 |
+| 网站退订 | 首期只返回人工链接，不执行浏览器自动化 |
+| 修改邮箱状态或联系人 | 根据操作分类审批并写审计日志 |
+
+审批配置必须落实到工具和服务边界；即使模型绕过 Skill，未批准的写操作也不能执行。
+
+## 9. 分步开发计划
+
+以下共 18 步。每一步完成并通过验收后再进入下一步；涉及架构或契约变化时先评审，不边写边猜。
+
+### 第 1 步：建立需求基线与功能追踪矩阵
+
+开发内容：
+
+- 将原项目所有用户能力、CLI 能力、Skills、Provider 差异、审批点和部署方式整理成追踪矩阵。
+- 为每项能力标记“完整复刻、行为调整、延期或不支持”。
+- Gmail 与 Outlook 按同期交付建立功能矩阵，确认所有副作用操作默认审批。
+
+验证：
+
+- 每个原 Skill、主要工具和用户入口都有唯一追踪编号。
+- 未确认项进入决策记录，不允许通过开发者个人猜测落地。
+
+### 第 2 步：完成 DeepAgents 技术 PoC 与版本锁定
+
+开发内容：
+
+- 用最小 Agent 验证 `create_deep_agent`、自定义工具、子代理、Skills、Checkpointer、StoreBackend 和 `interrupt_on`。
+- 验证当前选定模型的工具调用、结构化输出和上下文长度能力。
+- 确认同步调用、异步调用、SSE 事件和 interrupt 恢复方式。
+- PoC 通过后锁定 Python 与核心依赖版本。
+
+验证：
+
+- 一个测试线程能够调用假工具、触发审批、恢复执行并跨请求保留状态。
+- 重启后能按生产持久化设计恢复线程或明确说明本地模式限制。
+
+### 第 3 步：初始化后端工程骨架和质量门禁
+
+开发内容：
+
+- 建立 `src` 布局、依赖分组、配置模块、FastAPI 应用工厂和测试目录。
+- 配置 ruff、mypy、pytest、覆盖率及依赖安全扫描。
+- 建立 CI：安装锁定依赖、静态检查、单元测试、集成测试和镜像构建。
+- 增加 `.env.example`，只写变量名和安全示例，不提交真实凭证。
+
+验证：
+
+- 空骨架可以启动并通过 `/health/live`。
+- CI 在干净环境中可重复通过；故意引入 lint 或测试错误时会阻止合并。
+
+### 第 4 步：定义领域模型和 Provider 接口
+
+开发内容：
+
+- 定义 Email、Thread、Attachment、Contact、CalendarEvent、UnsubscribeOption 等领域 DTO。
+- 定义邮件和日历 Provider Protocol，仅暴露业务需要的方法。
+- 定义统一异常：认证失效、限流、超时、权限不足、资源不存在和上游不可用。
+- 明确 Gmail 与 Outlook 搜索能力差异，不强行把 Gmail 查询语法传给 Outlook。
+
+验证：
+
+- 使用 Fake Provider 完成读信、搜索、发信、日历查询和错误映射测试。
+- Agent/Service 层不导入 Gmail 或 Microsoft SDK 的具体类型。
+
+### 第 5 步：实现配置、身份和密钥安全
+
+开发内容：
+
+- 使用 Pydantic Settings 校验模型、数据库、邮件 Provider、时区和服务间认证配置。
+- 建立 OAuth token 存储/刷新接口，日志和异常中统一脱敏。
+- 首期实现单用户私有部署，但通过统一 `AuthContext`/身份依赖传递用户身份；业务代码禁止直接依赖“永远只有一个用户”的全局常量，为后续多用户认证留出稳定边界。
+- 对请求体大小、附件大小、并发和超时设置明确上限。
+
+验证：
+
+- 缺失必需配置时应用快速失败并给出不含秘密的错误。
+- 自动化测试确认 token、API key 和邮件正文不会出现在普通日志中。
+
+### 第 6 步：实现 Gmail Adapter
+
+开发内容：
+
+- 实现身份查询、收件箱、搜索、正文、已发送邮件、附件、未回复邮件、发信/回复等基础能力。
+- 设置连接/读取超时；只对安全幂等的读取请求执行有限重试。
+- 将 Gmail 原始响应转换成统一领域 DTO。
+- 发信接口接收幂等键，防止前端重试造成重复邮件。
+
+验证：
+
+- 使用 Mock/Recorded API 完成成功、空结果、分页、token 过期、限流、超时和权限不足测试。
+- 沙箱 Gmail 账号完成最小端到端验证，不使用个人生产邮箱作为自动化测试依赖。
+
+### 第 7 步：实现 Outlook Adapter 和能力降级
+
+开发内容：
+
+- 使用 Microsoft Graph 实现与统一接口对应的能力。
+- 为 Gmail 独有功能返回明确 capability 状态，不伪造成功。
+- 把 Outlook 文件夹、分类和查询方式封装在 Adapter 内。
+
+验证：
+
+- 相同 Provider 合约测试可分别运行于 Gmail Fake 和 Outlook Fake。
+- 前端/Agent 能区分“不支持”“未授权”“暂时失败”。
+
+### 第 8 步：实现日历 Adapter 与写操作保护
+
+开发内容：
+
+- 实现 Google Calendar 和 Microsoft Calendar 的查询、创建、更新、删除接口。
+- 所有写操作必须同时通过 DeepAgents interrupt 和 Service 审批凭证校验。
+- 对时间、时区、参与者、重复事件和删除目标进行确定性校验。
+
+验证：
+
+- 未批准、审批内容被篡改、审批过期和重复恢复均不能产生写操作。
+- 批准后只执行预览中展示的那一次操作。
+
+### 第 9 步：实现附件与退订确定性工具
+
+开发内容：
+
+- 迁移附件元数据获取和受控文本提取，增加 MIME、扩展名、大小、超时和临时文件隔离。
+- 迁移 List-Unsubscribe/List-Unsubscribe-Post 解析。
+- 实现 discovery、RFC 8058 POST、mailto 和 manual website 四类结果。
+- 退订状态持久化，防止重复执行并保留审计证据。
+
+验证：
+
+- 覆盖恶意文件名、超大附件、不支持类型、解析失败和路径穿越测试。
+- 退订测试覆盖 one-click、mailto、website、unknown、已退订、部分失败和重复提交。
+
+### 第 10 步：构建 DeepAgents 主 Agent 和最小权限子代理
+
+开发内容：
+
+- 创建 Supervisor，负责理解请求、规划 Todo、选择 Skill、委派和整合结果。
+- 创建 Mailbox Reader，只提供只读邮箱和附件工具。
+- 创建 Mail Writer，只提供草稿相关能力和受审批保护的发送工具。
+- 创建 Calendar Agent，只提供日历工具并区分读写权限。
+- 子代理必须配置清晰描述、任务边界、输出要求和独立工具白名单。
+
+验证：
+
+- 权限测试证明只读子代理无法发信、退订或修改日历。
+- 多步骤请求能按依赖顺序执行，失败步骤不会被总结成成功。
+
+### 第 11 步：迁移九类业务 Skill
+
+开发内容：
+
+- 将原 `registry.yaml + Python execute_skill` 重构为 DeepAgents Skill 目录和确定性工具组合。
+- 首批迁移：weekly summary、urgent triage、bug triage、resume review、draft reply、send prepared email、unsubscribe discovery、unsubscribe execute、writing style profile。
+- 每个 `SKILL.md` 只描述单一工作流、适用条件、安全边界、工具顺序和结果格式。
+- 原 Skill 中复杂的筛选、状态机和副作用逻辑保留在 Python 服务中，不改写为自由文本推理。
+
+验证：
+
+- 每个 Skill 至少有正常、空结果、上游失败和越权调用测试。
+- 使用原项目查询样例建立回归集，检查行为和证据一致性。
+
+### 第 12 步：实现线程状态和长期记忆
+
+开发内容：
+
+- 使用 Checkpointer 保存消息、Todo、interrupt 和线程执行状态。
+- 使用 CompositeBackend：线程工作区走 StateBackend，`/memories/` 走 StoreBackend。
+- 将 profile、habits、writing style 迁移为用户级记忆文件，并设置 user namespace。
+- 记忆写入采用白名单路径和内容规则，稳定事实与一次性对话分开。
+
+验证：
+
+- 同一用户不同线程可读取长期偏好；不同用户完全隔离。
+- 并发写入不静默覆盖，失败后不损坏已有记忆。
+- Prompt injection 不能写入策略或其他用户命名空间。
+
+### 第 13 步：实现企业级 FastAPI 接口
+
+开发内容：
+
+- 按 Router、Schema、Application Service、Agent Runtime、Provider 分层实现接口。
+- 实现统一成功/错误响应、全局异常处理、request/trace ID 和超时控制。
+- 实现同步聊天、SSE 聊天、线程查询、interrupt 恢复及线程删除。
+- 对输入长度、枚举、附件数量、线程 ID、审批操作和幂等键做 Pydantic 校验。
+- OpenAPI 中记录认证、状态码和事件结构。
+
+验证：
+
+- 契约测试覆盖 2xx、400、401、403、404、409、422、429、503 和 504 场景。
+- 异常响应不包含堆栈、内部路径、token 或原始上游响应。
+
+### 第 14 步：完善审计、日志、指标与追踪
+
+开发内容：
+
+- 输出结构化日志：trace ID、thread ID、匿名用户标识、Agent/工具名称、耗时和结果状态。
+- 邮件地址、主题、正文、附件内容、OAuth token 和模型密钥默认不写日志。
+- 对模型调用、工具调用、上游 API、审批等待、错误率和延迟建立指标。
+- 集成可选 LangSmith/OTel 追踪；未配置时不影响核心运行。
+- 对所有写操作记录审批人、预览摘要哈希、幂等键和最终结果。
+
+验证：
+
+- 能从一个 trace ID 定位完整调用链，但无法从普通日志还原敏感正文。
+- 关键错误和副作用操作具备可审计记录。
+
+### 第 15 步：复制前端并完成协议适配
+
+开发内容：
+
+- 将原 `oo-chat/` 复制为目标项目 `frontend/`，排除 `.next/`、`node_modules/` 和本地秘密文件。
+- 保持组件和视觉样式，最小修改 server-side API proxy、thread ID 和 SSE 解析。
+- 将 DeepAgents interrupt 映射为现有审批 UI 的 approval/edit/reject 操作。
+- 服务间认证只保存在 Next.js server 环境变量中。
+
+验证：
+
+- 前端构建通过，没有复制缓存、依赖目录或秘密。
+- 浏览器网络请求中不出现邮件 OAuth token、数据库凭证或后端服务密钥。
+
+### 第 16 步：执行前后端联调与核心旅程验收
+
+开发内容：
+
+- 联调普通对话、搜索邮件、查看正文、周报、紧急邮件、简历附件、草稿、发信审批、日历审批和退订审批。
+- 验证多轮上下文、刷新页面后的线程恢复、网络重试和部分失败提示。
+- 验证 Gmail/Outlook capability 差异能被用户看懂。
+
+验证：
+
+- 每条核心旅程有可重复的验收脚本和预期结果。
+- 任何工具失败都不会被 Agent 表述为已成功完成。
+
+### 第 17 步：完成安全、性能和可靠性验证
+
+开发内容：
+
+- 测试 Prompt injection、越权工具调用、线程越权、路径穿越、SSRF、恶意附件和敏感信息泄漏。
+- 对聊天和 Provider 调用执行并发、超时、取消、断线重连和限流测试。
+- 检查重复发送、重复退订和重复日历事件等幂等场景。
+- 执行依赖漏洞和容器镜像扫描。
+
+验证：
+
+- 高风险副作用无法绕过审批和用户隔离。
+- 性能基线、容量假设和已知瓶颈写入运行手册；未达标项不能静默上线。
+
+### 第 18 步：容器化、文档化和发布验收
+
+开发内容：
+
+- 提供后端、前端和 PostgreSQL 的开发 Compose；生产配置不内置秘密。
+- 增加数据库迁移、健康检查、优雅关闭、备份恢复和回滚说明。
+- 编写 README、配置表、OAuth 指南、API 示例、故障排查和运维手册。
+- 按功能追踪矩阵逐项签收，形成已知差异清单。
+
+验证：
+
+- 新环境按照 README 可以从零启动。
+- 自动化测试、前端构建、镜像构建、迁移演练和核心冒烟测试全部通过。
+- 发布包中不包含 `.env`、OAuth token、`.co/`、缓存、测试邮箱数据或个人信息。
+
+## 10. 测试策略
+
+### 10.1 测试分层
+
+- 单元测试：领域校验、错误映射、Skill 辅助逻辑、审批策略和幂等逻辑。
+- Provider 合约测试：同一组测试验证 Gmail/Outlook Adapter 的公共行为。
+- 集成测试：FastAPI、Checkpointer、StoreBackend、PostgreSQL 和 Fake Provider。
+- Agent 回归测试：使用固定模型响应或测试模型，避免 CI 依赖不稳定的真实 LLM。
+- 评估测试：使用真实模型定期运行原项目查询集，评价工具选择、证据性和安全性。
+- 前端契约测试：校验 JSON/SSE/interrupt 事件能被 UI 正确处理。
+- 端到端测试：使用测试邮箱和日历账号覆盖关键用户旅程。
+
+### 10.2 最低质量门禁
+
+- ruff、mypy、pytest 全部通过。
+- 新增核心业务逻辑必须有测试；总覆盖率目标不低于 80%，审批、幂等和权限模块目标不低于 90%。
+- 不允许通过删除测试、降低断言或吞掉异常使 CI 通过。
+- 外部 API 测试默认 mock；真实账号测试独立运行且凭证由安全环境注入。
+- 合并前检查变更范围，不混入无关格式化或重构。
+
+## 11. 企业级非功能要求
+
+### 安全
+
+- 最小权限 OAuth scope，token 加密存储并支持撤销。
+- 用户、线程、记忆和 Provider 凭证强隔离。
+- 所有写操作实行审批、幂等和审计。
+- 附件解析在受控环境中执行，不允许任意路径和任意命令。
+
+### 可靠性
+
+- 所有外部调用必须设置超时。
+- 只重试幂等操作；写操作依赖幂等键和状态机。
+- 支持优雅关闭、请求取消和中断恢复。
+- 上游失败返回明确的部分成功/失败结果，不伪造完成。
+
+### 可观测性
+
+- 请求、Agent、子代理和工具调用共享 trace ID。
+- 日志结构化且默认脱敏。
+- 具备延迟、错误率、token 消耗、上游限流和审批等待指标。
+
+### 可维护性
+
+- API 层不包含 Provider SDK 细节。
+- Agent Prompt/Skill 不承担确定性安全校验。
+- Gmail 与 Outlook 共用领域契约，但不隐藏真实能力差异。
+- 依赖精确锁定，升级必须通过回归集。
+
+## 12. 主要风险及应对
+
+| 风险 | 影响 | 应对 |
+|---|---|---|
+| DeepAgents API 版本变化 | interrupt、backend 或 subagent 行为变化 | 第 2 步 PoC 后锁版本，升级单独走回归 |
+| 原项目部分能力依赖 ConnectOnion 工具 | 无法直接迁移 | 用 Provider Adapter 重写，不引用 ConnectOnion 运行时 |
+| LLM 规划结果不稳定 | 工具选择或步骤遗漏 | 确定性工具、结构化结果、回归集和关键流程服务化 |
+| 前端协议与新后端不一致 | 聊天或审批无法联调 | 先冻结 JSON/SSE 契约，再最小修改 API proxy |
+| 多用户记忆泄漏 | 严重隐私事故 | Store namespace 使用可信用户身份并做隔离测试 |
+| 网络重试造成重复发信/退订 | 外部副作用 | 幂等键、审批记录和状态机 |
+| Outlook 能力弱于 Gmail | 用户体验不一致 | capability 模型、明确降级、分 Provider 验收 |
+| 附件包含恶意内容 | 资源消耗或安全风险 | 白名单、大小限制、隔离解析和超时 |
+| 自动化测试依赖真实 LLM/邮箱 | CI 不稳定且可能产生费用 | Fake Provider、固定模型、真实 E2E 独立执行 |
+
+## 13. 阶段性交付物
+
+### 阶段 A：基础平台（第 1—5 步）
+
+- 功能追踪矩阵、技术 PoC、锁定依赖、工程骨架、领域接口和安全配置。
+
+### 阶段 B：业务能力（第 6—12 步）
+
+- 邮件/日历 Adapter、附件和退订工具、DeepAgents 主/子代理、九类 Skills、线程和长期记忆。
+
+### 阶段 C：产品集成（第 13—16 步）
+
+- 企业 API、可观测性、复制并适配前端、核心旅程联调。
+
+### 阶段 D：上线准备（第 17—18 步）
+
+- 安全与性能验证、容器化、运维文档、发布和回滚验收。
+
+## 14. 开发启动前必须再次确认的决策
+
+### 14.1 已确认决策
+
+1. Gmail 与 Outlook 同期开发。
+2. 首期采用单用户私有部署，但按可扩展多用户服务设计身份、线程、凭证和记忆隔离边界。
+3. 发信、退订、日历写入、邮箱状态修改等外部副作用默认全部人工审批。
+4. 优先交付 Web/API；CLI 不作为首期阻塞项。
+5. PostgreSQL 由项目自建。
+6. 当前没有 Gmail、Outlook 和 Calendar 联调账号；前期使用 Fake Provider 和合约测试，进入真实 OAuth/E2E 阶段时再由项目负责人提供。
+7. 根目录已有 `.env`；配置开发时应复用并校验已有变量，不擅自覆盖文件或编造配置值。
+8. 项目自有的 `"""..."""` 内容尽量使用中文，但标准协议、API schema 和第三方固定值不强制翻译。
+9. 模型配置读取根目录 `.env` 中的 `MODEL`；模型必须按以下已知可用方式初始化，不自动拆分或重写 `raw_model`：
+
+   ```python
+   dotenv.load_dotenv()
+
+   raw_model = os.getenv("MODEL", "openai/gpt-5.1")
+   model = init_chat_model(
+       f"openai:{raw_model}",
+       use_responses_api=False,
+   )
+
+   agent = create_deep_agent(model=model)
+   ```
+
+10. 浏览器通过 Next.js 服务端代理访问 FastAPI，浏览器不直接持有服务间认证信息。
+11. PostgreSQL 开发环境由本项目 Docker Compose 启动，不要求宿主机单独安装。
+
+### 14.2 后续阶段所需外部条件
+
+真实邮箱账号不是第 1—5 步的前置条件。进入 Gmail/Outlook OAuth 集成和端到端联调阶段前，需要分别准备 Google Cloud OAuth 应用、Microsoft Entra 应用及对应的测试邮箱/日历账号。需要这些条件时应提前告知项目负责人，不得临时编造配置或使用个人生产邮箱替代测试账号。
+
+## 15. 参考依据
+
+- 原项目代码与 `docs/current-solution/` 文档；发生冲突时以运行代码为准。
+- DeepAgents 官方概览：<https://docs.langchain.com/oss/python/deepagents/overview>
+- DeepAgents 定制与子代理：<https://docs.langchain.com/oss/python/deepagents/customization>
+- DeepAgents Skills：<https://docs.langchain.com/oss/python/deepagents/skills>
+- DeepAgents Backends：<https://docs.langchain.com/oss/python/deepagents/backends>
+- DeepAgents Memory：<https://docs.langchain.com/oss/python/deepagents/memory>
+- DeepAgents Human-in-the-loop：<https://docs.langchain.com/oss/python/deepagents/human-in-the-loop>
+
+## 16. 当前实施进度
+
+### 第 1 步：已完成
+
+- 已完成原项目功能基线和架构决策，关键结论统一保留在本文档中，不再拆分额外过程文档。
+
+### 第 2 步：已完成（PostgreSQL 实例验证后移）
+
+- 已锁定 DeepAgents 0.6.12，并确认支持 Python 3.14。
+- 已按项目指定方式完成真实模型连接。
+- 已验证类型化工具调用、子代理委派、interrupt 批准/拒绝、同线程上下文和 StoreBackend 用户隔离。
+- 当前机器没有 Docker，因此 PostgreSQL Checkpointer 的容器重启恢复验证转入正式持久化步骤，不将内存验证冒充生产持久化验证。
+
+### 第 3 步：已完成
+
+- PoC 源码已清理，正式后端收敛为最小 FastAPI 主流程。
+- 已建立应用入口、模型构造、统一存活检查响应和 API 测试。
+- 已锁定正式依赖，并通过语法、pytest、Ruff 和 ASGI 冒烟检查。
+
+### 第 4 步：已完成
+
+- 已用单个 `contracts.py` 集中定义邮件、日历领域模型、Provider 能力、异步协议和统一异常，避免过早拆分文件。
+- Gmail、Outlook、Google Calendar 和 Microsoft Calendar 后续实现必须遵守同一契约，并通过 capability 显式表达差异。
+- 已验证字段约束、日历时间范围、邮件发送必填项、异常重试属性以及完整/不完整 Fake Provider 的运行时协议识别。
+
+### 第 5 步：已完成
+
+- 已集中实现环境配置、敏感值封装、外部调用超时与请求/附件大小边界。
+- 生产环境缺少服务间认证配置时会快速失败，配置对象不会在字符串输出中暴露敏感值。
+- 首期单用户通过统一 `AuthContext` 进入应用状态，为后续多用户认证和 StoreBackend namespace 保留稳定边界。
+- 模型仍严格使用项目已验证的 `dotenv.load_dotenv()` 与 `init_chat_model` 构造方式。

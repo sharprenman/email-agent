@@ -1,0 +1,232 @@
+"""邮件与日历 Provider 共用的领域契约。"""
+
+from collections.abc import Mapping, Sequence
+from datetime import datetime
+from enum import StrEnum
+from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ContractModel(BaseModel):
+    """禁止额外字段并保持不可变的基础契约模型。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+
+class ProviderName(StrEnum):
+    """首期支持的外部服务。"""
+
+    GMAIL = "gmail"
+    OUTLOOK = "outlook"
+
+
+class ProviderCapabilities(ContractModel):
+    """描述 Provider 的实际能力，避免伪造功能对等。"""
+
+    provider: ProviderName
+    attachments: bool = True
+    contacts: bool = True
+    calendar: bool = True
+    unsubscribe_headers: bool = False
+
+
+class MailboxIdentity(ContractModel):
+    """当前邮箱身份。"""
+
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str | None = Field(default=None, max_length=200)
+
+
+class EmailSummary(ContractModel):
+    """邮件列表使用的最小摘要。"""
+
+    id: str = Field(min_length=1, max_length=512)
+    thread_id: str | None = Field(default=None, max_length=512)
+    subject: str = Field(default="", max_length=998)
+    sender: str = Field(min_length=1, max_length=320)
+    recipients: tuple[str, ...] = ()
+    sent_at: datetime
+    snippet: str = Field(default="", max_length=2000)
+    is_read: bool = False
+    has_attachments: bool = False
+
+
+class EmailMessage(EmailSummary):
+    """包含正文和标准化头信息的完整邮件。"""
+
+    body_text: str = ""
+    body_html: str | None = None
+    headers: Mapping[str, str] = Field(default_factory=dict)
+
+
+class Attachment(ContractModel):
+    """邮件附件元数据。"""
+
+    id: str = Field(min_length=1, max_length=512)
+    email_id: str = Field(min_length=1, max_length=512)
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(ge=0)
+
+
+class Contact(ContractModel):
+    """邮件联系人。"""
+
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str | None = Field(default=None, max_length=200)
+
+
+class SendEmailRequest(ContractModel):
+    """发送或回复邮件所需的确定性字段。"""
+
+    to: tuple[str, ...] = Field(min_length=1, max_length=100)
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=1_000_000)
+    cc: tuple[str, ...] = Field(default=(), max_length=100)
+    bcc: tuple[str, ...] = Field(default=(), max_length=100)
+    reply_to_email_id: str | None = Field(default=None, max_length=512)
+
+
+class CalendarEventInput(ContractModel):
+    """创建或修改日历事件的输入。"""
+
+    title: str = Field(min_length=1, max_length=500)
+    start_at: datetime
+    end_at: datetime
+    timezone: str = Field(min_length=1, max_length=100)
+    attendees: tuple[str, ...] = Field(default=(), max_length=500)
+    location: str | None = Field(default=None, max_length=1000)
+    description: str | None = Field(default=None, max_length=20_000)
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> "CalendarEventInput":
+        """要求时间带时区，且结束时间严格晚于开始时间。"""
+        if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
+            raise ValueError("日历事件时间必须包含时区")
+        if self.end_at <= self.start_at:
+            raise ValueError("日历事件结束时间必须晚于开始时间")
+        return self
+
+
+class CalendarEvent(CalendarEventInput):
+    """已经由 Provider 保存的日历事件。"""
+
+    id: str = Field(min_length=1, max_length=512)
+
+
+class ProviderError(RuntimeError):
+    """可安全映射为统一服务错误的 Provider 基础异常。"""
+
+    code = "provider_error"
+    retryable = False
+
+
+class ProviderAuthenticationError(ProviderError):
+    """Provider 认证失效。"""
+
+    code = "provider_authentication_error"
+
+
+class ProviderPermissionError(ProviderError):
+    """Provider 权限不足。"""
+
+    code = "provider_permission_error"
+
+
+class ProviderRateLimitError(ProviderError):
+    """Provider 触发限流。"""
+
+    code = "provider_rate_limit_error"
+    retryable = True
+
+
+class ProviderTimeoutError(ProviderError):
+    """Provider 请求超时。"""
+
+    code = "provider_timeout_error"
+    retryable = True
+
+
+class ProviderNotFoundError(ProviderError):
+    """Provider 资源不存在。"""
+
+    code = "provider_not_found_error"
+
+
+class ProviderUnavailableError(ProviderError):
+    """Provider 暂时不可用。"""
+
+    code = "provider_unavailable_error"
+    retryable = True
+
+
+class UnsupportedCapabilityError(ProviderError):
+    """当前 Provider 不支持所请求能力。"""
+
+    code = "unsupported_capability"
+
+
+@runtime_checkable
+class MailProvider(Protocol):
+    """Gmail 与 Outlook 必须共同实现的异步邮件接口。"""
+
+    @property
+    def capabilities(self) -> ProviderCapabilities: ...
+
+    async def get_identity(self) -> MailboxIdentity: ...
+
+    async def read_inbox(
+        self,
+        *,
+        limit: int,
+        unread_only: bool = False,
+    ) -> Sequence[EmailSummary]: ...
+
+    async def search_emails(self, *, query: str, limit: int) -> Sequence[EmailSummary]: ...
+
+    async def get_email(self, email_id: str) -> EmailMessage: ...
+
+    async def get_sent_emails(self, *, limit: int) -> Sequence[EmailSummary]: ...
+
+    async def get_unanswered_emails(self, *, limit: int) -> Sequence[EmailSummary]: ...
+
+    async def list_attachments(self, email_id: str) -> Sequence[Attachment]: ...
+
+    async def list_contacts(self, *, limit: int) -> Sequence[Contact]: ...
+
+    async def send_email(self, request: SendEmailRequest, *, idempotency_key: str) -> str: ...
+
+    async def mark_read(self, email_id: str, *, idempotency_key: str) -> None: ...
+
+
+@runtime_checkable
+class CalendarProvider(Protocol):
+    """Google 与 Microsoft 日历必须共同实现的异步接口。"""
+
+    @property
+    def capabilities(self) -> ProviderCapabilities: ...
+
+    async def list_events(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> Sequence[CalendarEvent]: ...
+
+    async def create_event(
+        self,
+        event: CalendarEventInput,
+        *,
+        idempotency_key: str,
+    ) -> CalendarEvent: ...
+
+    async def update_event(
+        self,
+        event_id: str,
+        event: CalendarEventInput,
+        *,
+        idempotency_key: str,
+    ) -> CalendarEvent: ...
+
+    async def delete_event(self, event_id: str, *, idempotency_key: str) -> None: ...

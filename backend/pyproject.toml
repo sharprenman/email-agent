@@ -1,0 +1,38 @@
+[project]
+name = "deepagents-email"
+version = "0.1.0"
+description = "基于 DeepAgents 的企业级邮件智能体后端"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "deepagents==0.6.12",
+    "fastapi>=0.115,<1.0",
+    "langchain-openai>=1.0,<2.0",
+    "pydantic-settings>=2.10,<3.0",
+    "python-dotenv>=1.1,<2.0",
+    "uvicorn[standard]>=0.30,<1.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1.0",
+    "pytest>=8.0,<10.0",
+    "ruff>=0.12,<1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/email_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
