@@ -109,16 +109,21 @@ def test_list_identity_inbox_search_and_sent() -> None:
 def test_full_message_body_and_attachments() -> None:
     gmail, messages, _, _ = _gmail_mocks()
     messages.get.return_value = FakeRequest(_message("mail-1", attachment=True))
+    messages.attachments.return_value.get.return_value = FakeRequest(
+        {"data": _encoded("附件正文")}
+    )
     provider = GmailProvider(gmail)
 
     email = asyncio.run(provider.get_email("mail-1"))
     attachments = asyncio.run(provider.list_attachments("mail-1"))
+    content = asyncio.run(provider.download_attachment("mail-1", "attachment-1"))
 
     assert email.body_text == "纯文本正文"
     assert email.body_html == "<p>正文</p>"
     assert email.recipients == ("me@example.com", "copy@example.com")
     assert email.has_attachments is True
     assert attachments[0].filename == "报告.pdf"
+    assert content == "附件正文".encode()
 
 
 def test_message_list_follows_page_token_until_limit() -> None:

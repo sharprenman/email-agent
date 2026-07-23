@@ -99,7 +99,7 @@ def test_identity_lists_search_pagination_and_capabilities() -> None:
         assert searched[0].id == "search-1"
         assert sent[0].id == "sent-1"
         assert isinstance(provider, MailProvider)
-        assert provider.capabilities.unsubscribe_headers is False
+        assert provider.capabilities.unsubscribe_headers is True
         await provider.aclose()
 
     asyncio.run(scenario())
@@ -136,6 +136,14 @@ def test_full_message_attachments_contacts_and_empty_results() -> None:
                     ]
                 },
             )
+        if path.endswith("/messages/mail-1/attachments/attachment-1"):
+            return _ok(
+                request,
+                    {
+                        "@odata.type": "#microsoft.graph.fileAttachment",
+                        "contentBytes": "6ZmE5Lu25q2j5paH",
+                    },
+            )
         if path.endswith("/contacts"):
             return _ok(
                 request,
@@ -157,6 +165,7 @@ def test_full_message_attachments_contacts_and_empty_results() -> None:
         provider = OutlookProvider(_client(handler), access_token="access-token")
         email = await provider.get_email("mail-1")
         attachments = await provider.list_attachments("mail-1")
+        content = await provider.download_attachment("mail-1", "attachment-1")
         contacts = await provider.list_contacts(limit=10)
 
         assert email.body_html == "<p>邮件正文</p>"
@@ -164,6 +173,7 @@ def test_full_message_attachments_contacts_and_empty_results() -> None:
         assert email.recipients == ("me@example.com", "copy@example.com")
         assert email.headers["message-id"] == "<mail-1>"
         assert attachments[0].filename == "报告.pdf"
+        assert content == "附件正文".encode()
         assert (contacts[0].display_name, contacts[0].email) == (
             "张三",
             "zhangsan@example.com",

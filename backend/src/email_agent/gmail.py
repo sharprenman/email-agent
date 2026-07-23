@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import binascii
 import hashlib
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
@@ -144,6 +145,23 @@ class GmailProvider:
         """列出邮件中所有嵌套附件的元数据。"""
         raw = await self._get_raw_message(email_id)
         return list(_iter_attachments(raw.get("payload", {}), email_id))
+
+    async def download_attachment(self, email_id: str, attachment_id: str) -> bytes:
+        """下载指定附件正文并解码 Gmail 的 base64url 表示。"""
+        if not email_id.strip() or not attachment_id.strip():
+            raise ValueError("邮件 ID 和附件 ID 不能为空")
+        result = await self._execute(
+            self._gmail.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=email_id, id=attachment_id),
+            retries=self._read_retries,
+        )
+        data = _required_string(result, "data")
+        try:
+            return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        except (ValueError, binascii.Error) as exc:
+            raise ProviderUnavailableError("Gmail 返回了无效附件正文") from exc
 
     async def list_contacts(self, *, limit: int) -> Sequence[Contact]:
         """通过 People API 读取联系人。"""

@@ -1,6 +1,8 @@
 """基于 Microsoft Graph 的 Outlook 邮件 Provider。"""
 
 import asyncio
+import base64
+import binascii
 import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -73,7 +75,7 @@ class OutlookProvider:
             attachments=True,
             contacts=True,
             calendar=False,
-            unsubscribe_headers=False,
+            unsubscribe_headers=True,
         )
 
     async def get_identity(self) -> MailboxIdentity:
@@ -183,6 +185,24 @@ class OutlookProvider:
             )
             for item in items
         ]
+
+    async def download_attachment(self, email_id: str, attachment_id: str) -> bytes:
+        """下载 Outlook 文件附件正文；拒绝项目附件和云引用附件。"""
+        _validate_email_id(email_id)
+        _validate_email_id(attachment_id)
+        result = await self._request(
+            "GET",
+            f"/me/messages/{email_id}/attachments/{attachment_id}",
+        )
+        if result.get("@odata.type") != "#microsoft.graph.fileAttachment":
+            raise ProviderUnavailableError("Outlook 附件不是可解析的文件附件")
+        data = str(result.get("contentBytes") or "")
+        if not data:
+            raise ProviderUnavailableError("Outlook 附件正文为空")
+        try:
+            return base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ProviderUnavailableError("Outlook 返回了无效附件正文") from exc
 
     async def list_contacts(self, *, limit: int) -> Sequence[Contact]:
         """读取 Outlook 默认联系人文件夹。"""

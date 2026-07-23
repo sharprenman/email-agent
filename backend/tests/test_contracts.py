@@ -86,6 +86,7 @@ def test_runtime_protocol_accepts_complete_fake_providers() -> None:
                 "get_sent_emails",
                 "get_unanswered_emails",
                 "list_attachments",
+                "download_attachment",
                 "list_contacts",
                 "send_email",
                 "mark_read",

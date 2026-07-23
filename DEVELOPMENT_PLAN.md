@@ -129,10 +129,13 @@ deepAgents_email/
 │   │   │   ├── dependencies.py
 │   │   │   └── exception_handlers.py
 │   │   ├── agents/
-│   │   │   ├── supervisor.py
-│   │   │   ├── mailbox_reader.py
-│   │   │   ├── mail_writer.py
-│   │   │   └── calendar_agent.py
+│   │   │   ├── __init__.py
+│   │   │   ├── runtime.py
+│   │   │   ├── loader.py
+│   │   │   ├── results.py
+│   │   │   ├── definitions.toml
+│   │   │   ├── prompts/
+│   │   │   └── tools/
 │   │   ├── skills/
 │   │   │   └── <skill-name>/SKILL.md
 │   │   ├── tools/
@@ -162,6 +165,26 @@ deepAgents_email/
 ```
 
 目录以职责分层，不为单次使用的代码创建无意义抽象。具体文件只有在对应步骤开始开发时才创建。
+
+### 5.2 模块化治理原则
+
+- `src/email_agent` 是 Python 包根目录，不是所有实现的平铺目录；新增代码按
+  `agents`、`api`、`services`、`domain`、`providers`、`persistence`、`security`
+  等职责归属模块。
+- Agent 运行时装配、声明加载和 Prompt 资源分别放在 `agents/runtime.py`、
+  `agents/loader.py`、`agents/definitions.toml` 与 `agents/prompts/`，避免把编排、
+  权限和大段提示词堆在单文件中。
+- `agents/runtime.py` 只负责 Agent 图装配；Agent 输出契约放入 `agents/results.py`，
+  邮箱读取、邮件写入和日历 Tool 按权限域放入 `agents/tools/`，不得把 Tool 实现重新
+  堆回运行时。
+- `definitions.toml` 只能从 Python 硬编码的最小权限上限中选择工具，不能通过配置给
+  子代理扩权；副作用工具必须同时配置 DeepAgents interrupt。
+- Prompt 与 TOML 作为 Python 包资源加载，禁止依赖进程当前工作目录；构建时必须检查
+  wheel 中包含全部定义和提示词。
+- 模块依赖方向为 API → 应用服务/Agent → 领域端口 → Provider/持久化适配器，业务核心
+  不反向依赖 HTTP、数据库或供应商 SDK。
+- 第 11 步的业务 Skill 保持独立目录；Skill 描述工作流，确定性校验和副作用仍由 Python
+  服务承担，不与 Agent Prompt 混写。
 
 ## 6. 核心技术决策
 
@@ -362,6 +385,37 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 
 - 权限测试证明只读子代理无法发信、退订或修改日历。
 - 多步骤请求能按依赖顺序执行，失败步骤不会被总结成成功。
+
+### 第 10.1 步：完成 Agent 模块化治理
+
+开发内容：
+
+- 将第 10 步单文件按职责拆为运行时装配、配置加载、Agent 声明和独立 Prompt 文件。
+- 用 TOML 声明 Agent 描述、工具选择、可选工具和 interrupt，运行时按声明完成装配。
+- 在 Python 中维护不可由配置突破的工具权限上限，校验未知 Agent、重复名称、路径穿越、
+  未知工具、越权工具和副作用工具漏配审批。
+- 使用包资源读取 Prompt 和 Agent 声明，对外继续由 `email_agent.agents` 提供稳定入口。
+
+验证：
+
+- 现有 Agent 行为与审批测试全部通过，拆分不改变业务结果。
+- 配置越权、重复 Agent、不安全 Prompt 路径和漏配 interrupt 均启动失败。
+- 构建 wheel 并确认 TOML 与全部 Prompt 被包含，不依赖源码目录才能运行。
+
+### 第 10.2 步：完成 Agent Tool 模块化
+
+开发内容：
+
+- 将监督代理、邮箱读取、邮件写入和日历 Tool 从运行时拆至 `agents/tools/`，按权限域独立维护。
+- 将 `AgentTaskResult`、状态枚举和失败优先聚合规则拆至 `agents/results.py`。
+- `agents/runtime.py` 仅保留配置读取、Tool 注册、子代理装配和 DeepAgents 图创建。
+- 保持 Tool 名称、输入参数、返回结构、审批校验及 `email_agent.agents` 公共导入兼容。
+
+验证：
+
+- 原有 Agent、Tool 白名单、审批、可信用户和失败聚合测试全部通过。
+- Ruff、Python 编译、全量后端测试与 wheel 构建通过。
+- `runtime.py` 不再包含邮箱、退订和日历 Tool 的业务适配实现。
 
 ### 第 11 步：迁移九类业务 Skill
 
@@ -597,10 +651,14 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 - 原项目代码与 `docs/current-solution/` 文档；发生冲突时以运行代码为准。
 - DeepAgents 官方概览：<https://docs.langchain.com/oss/python/deepagents/overview>
 - DeepAgents 定制与子代理：<https://docs.langchain.com/oss/python/deepagents/customization>
+- DeepAgents 子代理工具隔离：<https://docs.langchain.com/oss/python/deepagents/subagents>
 - DeepAgents Skills：<https://docs.langchain.com/oss/python/deepagents/skills>
 - DeepAgents Backends：<https://docs.langchain.com/oss/python/deepagents/backends>
 - DeepAgents Memory：<https://docs.langchain.com/oss/python/deepagents/memory>
 - DeepAgents Human-in-the-loop：<https://docs.langchain.com/oss/python/deepagents/human-in-the-loop>
+- Gmail 附件读取：<https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments/get>
+- Microsoft Graph 文件附件：<https://learn.microsoft.com/en-us/graph/api/resources/fileattachment?view=graph-rest-1.0>
+- RFC 8058 One-Click Unsubscribe：<https://www.rfc-editor.org/rfc/rfc8058.html>
 
 ## 16. 当前实施进度
 
@@ -647,7 +705,8 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 - 已用单个 `outlook.py` 实现 Microsoft OAuth token 刷新，以及身份、收件箱、搜索、正文、已发送、未回复、附件元数据、联系人、发信/回复和标记已读能力。
 - Graph 列表严格沿用完整 `@odata.nextLink` 分页；读取请求有限重试，写请求不自动重试，401 刷新 token 后只重放一次未通过认证的请求。
 - 新邮件通过“创建草稿后发送”返回稳定草稿 ID；回复通过 `createReply` 保留 Outlook 会话关系。两类写操作均要求幂等键，持久化幂等和审批继续由后续服务层负责。
-- Outlook 能力明确设置 `unsubscribe_headers=False`，附件仅提供元数据，不虚构原项目尚未具备的退订工具链和附件正文提取能力。
+- 第 7 步暂未开放 Outlook 退订头和附件正文能力；第 9 步已基于 Graph 的
+  `internetMessageHeaders` 与文件附件 `contentBytes` 补齐这两项能力。
 - 已用 Mock Graph 验证分页、空结果、token 轮换、读取重试、写操作不重试、权限/限流/超时/服务异常和统一 Provider 合约；当前共有 43 项后端测试通过。
 - 真实 Microsoft Graph 端到端验证需要项目专用 Entra 应用、委托权限、refresh token 和测试邮箱；条件就绪前不把 Mock 测试表述为真实联调。
 
@@ -661,3 +720,61 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 - 当前一次性消费记录是单进程内存实现，满足首期单用户私有部署；扩展为多实例服务前必须在 PostgreSQL 持久化步骤中替换为带唯一约束的共享消费记录。
 - 已用 Fake Google Calendar 与 Fake Graph 验证分页、字段映射、重复规则、错误映射、缺失审批、内容篡改、审批过期和重复恢复；当前共有 54 项后端测试通过。
 - 真实端到端验证仍需要 Google Calendar scope、Microsoft `Calendars.ReadWrite` 委托权限及对应测试账号。
+
+### 第 9 步：代码与自动化验证已完成（真实退订联调待外部条件）
+
+- 已为 Gmail 和 Outlook Provider 增加附件正文下载，附件提取只支持
+  TXT、Markdown、HTML、PDF 和 DOCX，并同时校验 MIME、扩展名、声明大小与实际大小。
+- 附件解析全程使用内存，不采用不可信文件名创建磁盘文件；恶意路径会收敛为安全展示名。
+  解析任务受超时、输出长度、PDF 页数和 DOCX 解压正文大小限制。
+- 已解析 `List-Unsubscribe` 与 `List-Unsubscribe-Post`，支持 RFC 8058 one-click、
+  mailto、人工网站链接和 unknown 四类确定性结果。网站退订永远不自动执行。
+- one-click 只有在 HTTPS、DKIM 通过证据和 DKIM 签名头覆盖两个退订字段同时满足时才会开放；
+  执行严格发送 `List-Unsubscribe=One-Click` 表单，并禁用重定向。
+- one-click 与 mailto 均需一次性审批凭证，审批绑定可信用户、候选指纹、完整候选内容和幂等键。
+  网络结果不确定时不会自动重试，避免重复副作用。
+- 首期单用户状态采用原子替换的最小 JSON 存储，仅保存哈希化目标、幂等哈希、状态码和证据哈希，
+  不保存原始退订令牌；多实例部署前必须替换为带唯一约束的 PostgreSQL 实现。
+- 已覆盖恶意文件名、路径穿越、超限、格式伪装、解析失败、解析超时、one-click、mailto、
+  website、unknown、缺失 DKIM、重复提交和批量部分失败；当前共有 63 项后端测试通过。
+- 真实端到端验证仍需要项目专用测试邮箱及可安全退订的测试邮件列表，不能使用生产订阅做验证。
+
+### 第 10 步：代码与自动化验证已完成（真实模型行为评估后移）
+
+- 已在 `agents/` 模块中装配 DeepAgents Supervisor、`mailbox-reader`、`mail-writer` 和
+  `calendar-agent`，未提前创建第 11 步的业务 Skill 或第 13 步的 HTTP 聊天接口。
+- Supervisor 只持有无副作用的结果聚合工具；邮箱、邮件写入和日历业务能力必须通过 `task`
+  委派。DeepAgents 自动提供的 `general-purpose` 子代理只能继承该聚合工具，无法接触业务 Provider。
+- `mailbox-reader` 只允许身份、收件箱、搜索、正文、已发送、待回复、附件、联系人和退订发现；
+  工具白名单中不存在发信、执行退订或任何日历写入。
+- `mail-writer` 只允许结构化草稿、受审批发信和可选的受审批退订；草稿结果明确包含
+  `sent=false`，不能被表述为已发送。
+- `calendar-agent` 只允许日历查询及受审批的创建、修改、删除。日历和退订执行继续使用既有
+  Provider/Service 二次审批，发信新增同等级的服务层一次性审批校验。
+- 所有副作用工具首次调用时由 DeepAgents `interrupt_on` 中断；模型不能生成有效审批凭证，
+  后续 API 恢复层必须在用户批准后注入与请求内容、可信用户和幂等键绑定的凭证。
+- 子代理统一返回 `AgentTaskResult`。确定性聚合规则保证任一步失败时总体不能为 success，
+  混合成功与失败只能为 partial，并保留失败原因与证据。
+- 已验证 Agent 图实际构建、三个工具白名单、草稿未发送、发信审批不可绕过、可信用户透传、
+  退订隔离和失败聚合；完成模块化配置测试后当前共有 76 项后端测试通过。
+- 真实模型的工具选择准确率、长任务规划质量和 Prompt 回归将在第 11 步业务 Skill 数据集与
+  第 16 步端到端联调中验证，当前不把结构测试表述为真实模型验收。
+
+### 第 10.1 步：Agent 模块化治理已完成
+
+- 运行时装配已迁入 `agents/runtime.py`，Agent 声明和 Prompt 分别位于
+  `agents/definitions.toml` 与 `agents/prompts/`，加载和安全校验集中在
+  `agents/loader.py`。
+- TOML 只负责从代码白名单中选择工具，不能扩大任何 Agent 权限；未知工具、重复 Agent、
+  Prompt 路径穿越以及副作用工具漏配 interrupt 都会阻止服务启动。
+- `email_agent.agents` 保留稳定导入入口，调用方不需要了解内部文件结构。
+- 已增加包资源加载与配置安全测试；wheel 已包含 TOML 和四个 Prompt 资源。
+
+### 第 10.2 步：Agent Tool 模块化已完成
+
+- 监督代理、邮箱只读、邮件写入和日历 Tool 已分别迁入 `agents/tools/supervisor.py`、
+  `agents/tools/mailbox.py`、`agents/tools/mail_writer.py` 和 `agents/tools/calendar.py`，
+  权限域之间没有相互导入。
+- Agent 结果契约和失败优先聚合规则已迁入 `agents/results.py`。
+- `agents/runtime.py` 已缩减为 Agent 图装配模块，不再实现邮箱、退订或日历 Tool；
+  原有公共导入、Tool 契约和双层审批行为保持不变。

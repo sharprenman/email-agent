@@ -48,11 +48,14 @@ MAX_APPROVAL_TTL_SECONDS = 900
 
 
 class ApprovalAction(StrEnum):
-    """需要用户明确批准的日历写操作。"""
+    """需要用户明确批准的外部副作用操作。"""
 
     CREATE = "calendar.create"
     UPDATE = "calendar.update"
     DELETE = "calendar.delete"
+    SEND_EMAIL = "mail.send"
+    UNSUBSCRIBE_ONE_CLICK = "unsubscribe.one_click"
+    UNSUBSCRIBE_MAILTO = "unsubscribe.mailto"
 
 
 class ApprovalError(RuntimeError):
@@ -152,7 +155,7 @@ class ApprovalService:
             or claims.get("target") != target_id
             or not hmac.compare_digest(str(claims.get("request_hash") or ""), expected_hash)
         ):
-            raise ApprovalMismatchError("审批凭证与当前日历变更不匹配")
+            raise ApprovalMismatchError("审批凭证与当前待执行操作不匹配")
         jti = str(claims.get("jti") or "")
         if not jti:
             raise ApprovalRequiredError("审批凭证缺少唯一标识")
@@ -191,7 +194,7 @@ class ApprovalService:
 def build_approval_service(settings: Settings) -> ApprovalService:
     """从配置创建审批服务，缺少签名密钥时默认拒绝启动写能力。"""
     if settings.approval_signing_secret is None:
-        raise ApprovalRequiredError("缺少 APPROVAL_SIGNING_SECRET，日历写能力不可用")
+        raise ApprovalRequiredError("缺少 APPROVAL_SIGNING_SECRET，外部写能力不可用")
     return ApprovalService(settings.approval_signing_secret.get_secret_value())
 
 
@@ -801,7 +804,7 @@ def _google_idempotent_event_id(idempotency_key: str) -> str:
 
 def _validate_idempotency_key(value: str) -> None:
     if not value.strip():
-        raise ValueError("日历写操作必须提供幂等键")
+        raise ValueError("外部写操作必须提供幂等键")
 
 
 def _validate_event_id(event_id: str) -> None:
