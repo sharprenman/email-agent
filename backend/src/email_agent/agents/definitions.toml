@@ -1,0 +1,46 @@
+[supervisor]
+name = "email-supervisor"
+description = "理解请求、委派最小权限子代理并汇总可核验结果。"
+prompt = "prompts/supervisor.md"
+tools = ["merge_subagent_results"]
+
+[[subagents]]
+name = "mailbox-reader"
+description = "只读检索邮箱、正文、联系人、附件及退订方式。任何需要发送或修改的任务都不能使用。"
+prompt = "prompts/mailbox_reader.md"
+tools = [
+  "get_mailbox_identity",
+  "read_inbox",
+  "search_emails",
+  "get_email",
+  "get_sent_emails",
+  "get_unanswered_emails",
+  "list_email_attachments",
+  "extract_attachment_text",
+  "list_contacts",
+  "discover_email_unsubscribe",
+]
+
+[[subagents]]
+name = "mail-writer"
+description = "准备邮件草稿，并在人工审批后发送邮件或执行退订。不得用于普通邮箱搜索。"
+prompt = "prompts/mail_writer.md"
+tools = ["prepare_email_draft", "send_email", "execute_unsubscribe"]
+optional_tools = ["execute_unsubscribe"]
+interrupt_on = ["send_email", "execute_unsubscribe"]
+
+[[subagents]]
+name = "calendar-agent"
+description = "查询日历，并在人工审批后创建、修改或删除事件。不得访问邮件正文。"
+prompt = "prompts/calendar_agent.md"
+tools = [
+  "list_calendar_events",
+  "create_calendar_event",
+  "update_calendar_event",
+  "delete_calendar_event",
+]
+interrupt_on = [
+  "create_calendar_event",
+  "update_calendar_event",
+  "delete_calendar_event",
+]
