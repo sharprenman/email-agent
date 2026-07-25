@@ -2,7 +2,13 @@
 name = "email-supervisor"
 description = "理解请求、委派最小权限子代理并汇总可核验结果。"
 prompt = "prompts/supervisor.md"
-tools = ["merge_subagent_results"]
+tools = [
+  "prepare_skill_workflow",
+  "merge_subagent_results",
+  "read_user_memory",
+  "save_user_memory",
+]
+interrupt_on = ["save_user_memory"]
 
 [[subagents]]
 name = "mailbox-reader"

@@ -17,7 +17,14 @@ CALENDAR_AGENT = "calendar-agent"
 _EXPECTED_SUBAGENTS = frozenset({MAILBOX_READER, MAIL_WRITER, CALENDAR_AGENT})
 _MAXIMUM_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "email-supervisor": frozenset({"merge_subagent_results"}),
+        "email-supervisor": frozenset(
+            {
+                "prepare_skill_workflow",
+                "merge_subagent_results",
+                "read_user_memory",
+                "save_user_memory",
+            }
+        ),
         MAILBOX_READER: frozenset(
             {
                 "get_mailbox_identity",
@@ -50,6 +57,7 @@ _SIDE_EFFECT_TOOLS = frozenset(
         "create_calendar_event",
         "update_calendar_event",
         "delete_calendar_event",
+        "save_user_memory",
     }
 )
 

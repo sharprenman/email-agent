@@ -19,6 +19,8 @@ from email_agent.agents import (
     mail_approval_payload,
     merge_task_results,
 )
+from email_agent.api.schemas import ChatRequest, ResumeRequest, ThreadStatus
+from email_agent.api.service import AgentApplicationService
 from email_agent.calendar import ApprovalAction, ApprovalRequiredError, ApprovalService
 from email_agent.config import AuthContext
 from email_agent.content_tools import (
@@ -30,13 +32,20 @@ from email_agent.content_tools import (
     UnsubscribeSource,
 )
 from email_agent.contracts import CalendarEvent, CalendarEventInput, SendEmailRequest
+from email_agent.skills import EMAIL_SKILL_SOURCE, EMAIL_SKILLS
+
+
+class _ToolCapableFakeModel(GenericFakeChatModel):
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        del tools, tool_choice, kwargs
+        return self
 
 
 def _fake_model() -> GenericFakeChatModel:
-    return GenericFakeChatModel(messages=iter([AIMessage(content="测试完成")]))
+    return _ToolCapableFakeModel(messages=iter([AIMessage(content="测试完成")]))
 
 
-def _build_runtime(unsubscribe_service=None):
+def _build_runtime(unsubscribe_service=None, *, model=None):
     mail = SimpleNamespace(
         get_identity=AsyncMock(),
         read_inbox=AsyncMock(return_value=[]),
@@ -65,7 +74,7 @@ def _build_runtime(unsubscribe_service=None):
         approvals=approvals,
         auth=auth,
         unsubscribe_service=unsubscribe_service,
-        model=_fake_model(),
+        model=model or _fake_model(),
     )
     return runtime, mail, calendar, approvals, auth
 
@@ -84,8 +93,47 @@ def test_runtime_builds_supervisor_and_three_explicit_subagents() -> None:
         MAIL_WRITER,
         CALENDAR_AGENT,
     ]
-    assert {tool.name for tool in runtime.main_tools} == {"merge_subagent_results"}
+    assert {tool.name for tool in runtime.main_tools} == {
+        "prepare_skill_workflow",
+        "merge_subagent_results",
+        "read_user_memory",
+        "save_user_memory",
+    }
     assert all(spec["response_format"] is AgentTaskResult for spec in runtime.subagents)
+    assert runtime.skill_bundle.names == EMAIL_SKILLS
+    assert runtime.skill_bundle.sources == (EMAIL_SKILL_SOURCE,)
+    assert runtime.agent.checkpointer is runtime.persistence.checkpointer
+    assert runtime.agent.store is runtime.persistence.store
+    assert runtime.context.user_id == "trusted-user"
+    assert runtime.approvals is not None
+
+
+def test_runtime_injects_builtin_skill_files() -> None:
+    runtime, _, _, _, _ = _build_runtime()
+
+    payload = runtime.prepare_input({"messages": ["生成一份周报"]})
+
+    assert len(payload["files"]) == len(EMAIL_SKILLS)
+    assert all(path.endswith("/SKILL.md") for path in payload["files"])
+
+
+def test_supervisor_workflow_tool_enforces_skill_limits() -> None:
+    runtime, _, _, _, _ = _build_runtime()
+    tool = next(item for item in runtime.main_tools if item.name == "prepare_skill_workflow")
+
+    result = asyncio.run(
+        tool.ainvoke(
+            {
+                "skill_name": "urgent-email-triage",
+                "days": 90,
+                "max_results": 999,
+            }
+        )
+    )
+
+    assert result["days"] == 7
+    assert result["max_results"] == 250
+    assert result["search_query"].startswith("in:inbox newer_than:7d")
 
 
 def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> None:
@@ -119,11 +167,125 @@ def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> Non
         "delete_calendar_event",
     }
     assert runtime.interrupt_on == {
+        "save_user_memory": True,
         "send_email": True,
         "create_calendar_event": True,
         "update_calendar_event": True,
         "delete_calendar_event": True,
     }
+
+
+def test_memory_tool_uses_versioned_current_user_store() -> None:
+    runtime, _, _, _, _ = _build_runtime()
+    read_tool = next(item for item in runtime.main_tools if item.name == "read_user_memory")
+    save_tool = next(item for item in runtime.main_tools if item.name == "save_user_memory")
+
+    empty = asyncio.run(read_tool.ainvoke({"kind": "writing-style"}))
+    saved = asyncio.run(
+        save_tool.ainvoke(
+            {
+                "kind": "writing-style",
+                "content": "# 写作风格\n\n## 语气\n- 偏好简洁、正式的中文表达",
+                "expected_version": 0,
+            }
+        )
+    )
+
+    assert empty["exists"] is False
+    assert saved["version"] == 1
+    assert runtime.memory_service.read("writing-style").content.startswith("# 写作风格")
+
+
+def test_memory_write_interrupt_is_checkpointed_before_store_change() -> None:
+    model = _ToolCapableFakeModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "save_user_memory",
+                            "args": {
+                                "kind": "profile",
+                                "content": "# 用户画像\n- 称呼：小王",
+                                "expected_version": 0,
+                            },
+                            "id": "memory-write-1",
+                        }
+                    ],
+                )
+            ]
+        )
+    )
+    runtime, _, _, _, _ = _build_runtime(model=model)
+    config = {"configurable": {"thread_id": "memory-interrupt-thread"}}
+
+    result = runtime.agent.invoke(
+        runtime.prepare_input({"messages": ["请记住称呼"]}),
+        config,
+        context=runtime.context,
+    )
+
+    assert result["__interrupt__"]
+    assert runtime.agent.get_state(config).next
+    assert runtime.memory_service.read("profile") is None
+
+
+def test_application_service_resumes_real_deepagent_memory_interrupt() -> None:
+    model = _ToolCapableFakeModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "save_user_memory",
+                            "args": {
+                                "kind": "profile",
+                                "content": "# 用户画像\n- 称呼：小王",
+                                "expected_version": 0,
+                            },
+                            "id": "memory-write-api-1",
+                        }
+                    ],
+                ),
+                AIMessage(content="长期记忆已经保存"),
+            ]
+        )
+    )
+    runtime, _, _, _, _ = _build_runtime(model=model)
+    service = AgentApplicationService(runtime)
+    interrupted = asyncio.run(
+        service.chat(
+            ChatRequest(
+                message="请记住我的称呼",
+                idempotency_key="real-chat-request-0001",
+            )
+        )
+    )
+
+    assert interrupted.status is ThreadStatus.INTERRUPTED
+
+    resumed = asyncio.run(
+        service.resume(
+            interrupted.thread_id,
+            ResumeRequest.model_validate(
+                {
+                    "interrupt_id": interrupted.pending_approvals[0].interrupt_id,
+                    "idempotency_key": "real-resume-request-0001",
+                    "decisions": [
+                        {
+                            "type": "approve",
+                            "operation_idempotency_key": "real-memory-operation-0001",
+                        }
+                    ],
+                }
+            ),
+        )
+    )
+
+    assert resumed.status is ThreadStatus.COMPLETED
+    assert runtime.memory_service.read("profile").content.startswith("# 用户画像")
 
 
 def test_draft_is_explicitly_not_sent() -> None:

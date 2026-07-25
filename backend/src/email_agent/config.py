@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     )
     service_auth_token: SecretStr | None = None
     approval_signing_secret: SecretStr | None = Field(default=None, min_length=32)
+    database_url: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = Field(default=None, max_length=2048)
     google_client_id: str | None = Field(default=None, max_length=512)
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     microsoft_refresh_token: SecretStr | None = None
     model: str = Field(default="openai/gpt-5.1", min_length=1, max_length=255)
     provider_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    agent_timeout_seconds: float = Field(default=120.0, ge=1, le=600)
     max_request_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
     max_attachment_bytes: int = Field(default=26_214_400, ge=1024, le=104_857_600)
 
@@ -59,6 +61,8 @@ class Settings(BaseSettings):
                 missing.append("SERVICE_AUTH_TOKEN")
             if self.approval_signing_secret is None:
                 missing.append("APPROVAL_SIGNING_SECRET")
+            if self.database_url is None:
+                missing.append("DATABASE_URL")
         if missing:
             raise ValueError("生产环境必须配置：" + ", ".join(missing))
         return self

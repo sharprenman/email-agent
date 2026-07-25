@@ -124,10 +124,10 @@ deepAgents_email/
 │   ├── src/email_agent/
 │   │   ├── main.py
 │   │   ├── api/
-│   │   │   ├── routers/
-│   │   │   ├── schemas/
-│   │   │   ├── dependencies.py
-│   │   │   └── exception_handlers.py
+│   │   │   ├── router.py
+│   │   │   ├── schemas.py
+│   │   │   ├── service.py
+│   │   │   └── errors.py
 │   │   ├── agents/
 │   │   │   ├── __init__.py
 │   │   │   ├── runtime.py
@@ -137,7 +137,10 @@ deepAgents_email/
 │   │   │   ├── prompts/
 │   │   │   └── tools/
 │   │   ├── skills/
+│   │   │   ├── catalog.py
+│   │   │   ├── workflows.py
 │   │   │   └── <skill-name>/SKILL.md
+│   │   ├── persistence.py
 │   │   ├── tools/
 │   │   ├── services/
 │   │   ├── domain/
@@ -146,7 +149,6 @@ deepAgents_email/
 │   │   │   ├── outlook/
 │   │   │   ├── google_calendar/
 │   │   │   └── microsoft_calendar/
-│   │   ├── persistence/
 │   │   ├── security/
 │   │   ├── observability/
 │   │   └── core/
@@ -185,6 +187,11 @@ deepAgents_email/
   不反向依赖 HTTP、数据库或供应商 SDK。
 - 第 11 步的业务 Skill 保持独立目录；Skill 描述工作流，确定性校验和副作用仍由 Python
   服务承担，不与 Agent Prompt 混写。
+- Web/API 运行时使用 StateBackend 虚拟文件注入内置 Skill，不允许为读取 Skill 启用可访问
+  宿主磁盘的 FilesystemBackend；调用方不能覆盖 `/skills/email/` 下的内置资源。
+- 线程 Checkpointer、用户 Store、长期记忆白名单和 PostgreSQL 生命周期集中在
+  `persistence.py`；Agent 运行时只负责注入资源和装配 CompositeBackend，不包含数据库建表、
+  连接管理或记忆内容校验。
 
 ## 6. 核心技术决策
 
@@ -778,3 +785,87 @@ DeepAgents 依赖版本必须在 PoC 通过后精确锁定到 lockfile，不直�
 - Agent 结果契约和失败优先聚合规则已迁入 `agents/results.py`。
 - `agents/runtime.py` 已缩减为 Agent 图装配模块，不再实现邮箱、退订或日历 Tool；
   原有公共导入、Tool 契约和双层审批行为保持不变。
+
+### 第 11 步：九类业务 Skill 已完成代码与自动化验证
+
+- 已迁移 weekly email summary、urgent email triage、bug issue triage、
+  resume candidate review、draft reply、send prepared email、unsubscribe discovery、
+  unsubscribe execute 和 writing style profile 九类工作流。
+- 每个 Skill 使用独立目录和中文 `SKILL.md`，包含适用条件、输入规则、执行流程、安全边界、
+  空结果、上游失败和结果要求；原项目的动态 `registry.yaml + execute_skill` 不再复制。
+- `skills/catalog.py` 启动时校验固定九项、目录与名称一致、必需章节、直接工具白名单和委派工具
+  声明，并打包为 `/skills/email/` 下的 StateBackend 虚拟文件。
+- `skills/workflows.py` 确定性生成时间窗口、搜索查询、结果上限和委派工具组合；
+  Supervisor 必须先调用无副作用的 `prepare_skill_workflow`，Prompt 不能自行扩大范围。
+- 内置 Skill 只允许直接使用 `task`、`prepare_skill_workflow` 和
+  `merge_subagent_results`；具体邮箱、日历和副作用工具仍受三个子代理白名单、interrupt、
+  服务层审批和幂等校验约束。
+- 已验证 DeepAgents 原生 SkillsMiddleware 能识别全部九项，StateBackend 注入后模型系统提示
+  包含 Skill 目录；调用输入不能覆盖内置 Skill 文件。
+- writing style 本步骤只生成可供持久化的画像，不虚假声称已经跨会话保存；用户级 StoreBackend
+  写入与隔离在第 12 步实现。
+- 当前共有 104 项后端测试通过；真实模型的 Skill 选择准确率和长任务回归仍按第 16 步
+  端到端数据集验收，当前不把结构与模拟模型测试表述为真实模型行为验收。
+
+### 第 12 步：线程状态和长期记忆已完成代码与自动化验证
+
+- Agent 已接入 LangGraph Checkpointer；消息、Todo、interrupt 和线程工作区随 `thread_id`
+  保存，默认工作区继续使用 StateBackend。
+- 已使用 CompositeBackend 将 `/memories/` 路由到 StoreBackend，并固定为
+  `profile.md`、`habits.md`、`writing-style.md` 三类用户级记忆。
+- Store namespace 使用可信 `user_id`，运行时上下文与构建 Agent 时的可信身份不一致会被拒绝；
+  首期单用户部署与后续多用户隔离采用同一命名空间规则。
+- 通用文件工具只能读取长期记忆，不能直接写入；`save_user_memory` 是唯一写入口，必须经过
+  DeepAgents interrupt 审批，并且要求先读取版本后执行乐观版本写入。
+- 记忆内容仅允许固定中文标题、二级标题和事实条目，同时限制总大小、单行长度并拦截常见
+  Prompt injection 特征；一次性对话、邮件正文、联系人、凭证和策略指令不得持久化。
+- 已提供 PostgreSQL Checkpointer/Store 生命周期工厂并锁定
+  `langgraph-checkpoint-postgres` 与 psycopg 依赖；生产环境缺少 `DATABASE_URL` 时配置校验失败。
+- 已验证同用户跨线程读取、不同用户隔离、并发版本冲突、Store 失败不损坏旧内容、非白名单
+  路径和指令注入拒绝、记忆审批中断入检查点；当前共有 118 项后端测试通过。
+- 因当前没有 PostgreSQL 连接信息，本步骤未声称完成真实 PostgreSQL 建表和重启恢复联调；
+  获得数据库后需补充真实连接、进程重启恢复和多实例并发验证。
+
+### 第 13 步：企业级 FastAPI 接口已完成代码与自动化验证
+
+- 已按 Router、Schema、Application Service、Agent Runtime 和 Provider 边界实现
+  `POST /api/v1/chat`、`POST /api/v1/chat/stream`、线程查询、interrupt 恢复和线程删除。
+- HTTP 成功响应统一为 `code/message/data/request_id/trace_id`；400、401、403、404、409、
+  422、429、503 和 504 使用稳定错误码，异常响应不返回堆栈、服务器路径、token 或上游原文。
+- 使用 `X-Service-Token` 执行服务间认证；生产环境必须配置，开发/测试环境可显式不配置。
+  用户身份只从服务端 `AuthContext` 获取，请求正文携带 `user_id` 会因额外字段被拒绝。
+- 首次聊天由服务端生成 thread ID，并在 Store 中记录可信用户所有权；查询、继续、恢复和删除
+  均先验证所有权。同线程执行使用进程内串行锁，幂等键重复返回 409。
+- interrupt 恢复通过 `interrupt_id + decisions` 精确匹配待审批动作；API 恢复层会覆盖模型生成的
+  幂等键并签发绑定最终参数的一次性审批凭证，客户端不能注入审批 token 或更换工具名称。
+- SSE 使用命名事件 `thread/message/tool/approval_required/completed/error`；工具事件只返回
+  工具名称和调用 ID，不返回工具参数，审批卡片事件才返回经敏感字段过滤的待确认参数。
+- 增加 request/trace ID 中间件、请求体声明长度限制、Agent 超时、统一异常处理和
+  `/health/ready`。应用未装配 Agent/Persistence 时聊天和就绪检查明确返回 503，
+  `/health/live` 始终不访问外部依赖。
+- Chat、审批、附件引用、线程 ID、审批动作、编辑参数、请求幂等键和操作幂等键均由 Pydantic
+  严格校验；OpenAPI 已记录服务认证、错误状态和 `text/event-stream`。
+- 当前没有受控附件上传/解析服务，非空附件引用会返回明确 503，不接受或转发任意本地路径；
+  前端附件协议和上传能力在第 15—16 步联调时补齐。
+- 已验证真实 DeepAgents interrupt 经 HTTP 应用服务恢复后写入长期记忆，并完成 146 项后端
+  自动化测试；真实模型、真实邮箱和 PostgreSQL 仍按第 16 步端到端条件验收。
+
+### 第 14 步：审计、日志、指标与追踪代码已完成
+
+- 新增单文件 `observability.py` 作为独立可观测性模块，没有把日志、指标和追踪逻辑继续堆入
+  `runtime.py`，也没有拆出只含少量代码的多层目录。
+- HTTP、Agent、模型、工具、Provider 上游调用和审批等待共用 request ID、trace ID、thread ID
+  与匿名用户引用；HTTP 指标使用路由模板作为名称，避免线程 ID 形成高基数标签。
+- 普通日志采用固定字段白名单，只允许组件名称、结果、耗时、异常类型和关联 ID；回调不会读取
+  Prompt、邮件参数、工具输出或上游原文，原始用户标识使用进程密钥 HMAC 后再记录。
+- 指标使用有界聚合，包含调用次数、成功/失败、总耗时、最大耗时及模型输入/输出 token；
+  Provider 相关工具同步形成上游调用指标，限流和超时按异常类型聚合。
+- LangChain 回调 metadata 支持部署环境按标准方式启用 LangSmith；OTel 通过可选 TraceSink
+  适配器接入，默认使用空实现，不配置时不会导入 SDK 或发送外部遥测。
+- 所有经 interrupt 审批的邮件、退订、日历和长期记忆写操作都会记录审批人匿名引用、
+  预览摘要哈希、操作幂等键哈希、审批结果和最终执行结果；拒绝操作记录为未执行。
+- 新增脱敏、token 指标、工具/上游指标、可选追踪和写操作审计测试；在可用的 Python 3.14
+  依赖组合中，除未安装 `pypdf` 的附件专项外共 142 项测试通过，相关模块定向回归全部通过。
+- 当前包下载链路无法下载锁文件中的二进制包，因此尚未声称完成 `uv sync --frozen` 后的
+  151 项正式全量复验；已完成语法编译、差异检查和非 PDF 广泛回归，下载恢复后只需补跑
+  锁定环境的 pytest 与 Ruff，不需要人工邮箱、模型、数据库或密钥。

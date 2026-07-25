@@ -17,6 +17,7 @@ def test_secret_values_are_masked() -> None:
         openai_api_key="test-secret",
         service_auth_token="service-secret",
         approval_signing_secret="approval-signing-secret-32-bytes-long",
+        database_url="postgresql://user:database-secret@localhost/email",
         microsoft_client_secret="microsoft-secret",
         microsoft_access_token="microsoft-access-token",
         microsoft_refresh_token="microsoft-refresh-token",
@@ -26,6 +27,7 @@ def test_secret_values_are_masked() -> None:
     assert "test-secret" not in rendered
     assert "service-secret" not in rendered
     assert "approval-signing-secret-32-bytes-long" not in rendered
+    assert "database-secret" not in rendered
     assert "microsoft-secret" not in rendered
     assert "microsoft-access-token" not in rendered
     assert "microsoft-refresh-token" not in rendered
@@ -38,6 +40,16 @@ def test_production_requires_service_auth_token() -> None:
         Settings(app_env=AppEnvironment.PRODUCTION, service_auth_token=None)
 
 
+def test_production_requires_postgresql() -> None:
+    with pytest.raises(ValidationError, match="DATABASE_URL"):
+        Settings(
+            app_env=AppEnvironment.PRODUCTION,
+            service_auth_token="service-secret",
+            approval_signing_secret="approval-signing-secret-32-bytes-long",
+            database_url=None,
+        )
+
+
 def test_limits_reject_unsafe_values() -> None:
     """请求大小和外部调用超时必须保持在确定边界内。"""
     with pytest.raises(ValidationError):
@@ -45,6 +57,9 @@ def test_limits_reject_unsafe_values() -> None:
 
     with pytest.raises(ValidationError):
         Settings(max_request_bytes=100)
+
+    with pytest.raises(ValidationError):
+        Settings(agent_timeout_seconds=0)
 
 
 def test_single_user_context_is_attached_to_application() -> None:
