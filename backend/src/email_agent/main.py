@@ -4,6 +4,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, Request, Response
@@ -14,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .api import AgentApplicationService, api_router
 from .api.errors import register_exception_handlers, service_unavailable
 from .api.schemas import ApiResponse, ErrorResponse, ReadyData
+from .bootstrap import open_agent_service
 from .config import Settings, build_default_auth_context, get_settings
 from .observability import Observability
 
@@ -125,6 +127,7 @@ def create_app(
     *,
     agent_service: AgentApplicationService | None = None,
     observability: Observability | None = None,
+    auto_configure: bool = False,
 ) -> FastAPI:
     """创建 FastAPI 应用。"""
     effective_settings = settings or get_settings()
@@ -140,9 +143,30 @@ def create_app(
         or service_observability
         or Observability()
     )
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        if (
+            agent_service is not None
+            or not auto_configure
+            or effective_settings.mail_provider is None
+        ):
+            yield
+            return
+        async with open_agent_service(
+            effective_settings,
+            effective_observability,
+        ) as configured_service:
+            application.state.agent_service = configured_service
+            try:
+                yield
+            finally:
+                application.state.agent_service = None
+
     application = FastAPI(
         title="DeepAgents 邮件智能体 API",
         version="0.1.0",
+        lifespan=lifespan,
     )
     application.state.settings = effective_settings
     application.state.default_auth_context = build_default_auth_context(effective_settings)
@@ -196,4 +220,4 @@ def _safe_id(value: str | None) -> str:
     return uuid.uuid4().hex
 
 
-app = create_app()
+app = create_app(auto_configure=True)

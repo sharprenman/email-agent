@@ -9,7 +9,11 @@ from ...skills import prepare_skill_workflow
 from ..results import AgentTaskResult, merge_task_results
 
 
-def build_supervisor_tools(memory: UserMemoryService) -> tuple[BaseTool, ...]:
+def build_supervisor_tools(
+    memory: UserMemoryService,
+    *,
+    user_timezone: str,
+) -> tuple[BaseTool, ...]:
     """构建监督代理的编排和受审批长期记忆 Tool。"""
 
     async def merge_subagent_results(
@@ -30,6 +34,7 @@ def build_supervisor_tools(memory: UserMemoryService) -> tuple[BaseTool, ...]:
             days=days,
             max_results=max_results,
             query=query,
+            timezone=user_timezone,
         ).model_dump(mode="json")
 
     async def read_user_memory(kind: MemoryKind) -> dict[str, Any]:

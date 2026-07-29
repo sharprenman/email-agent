@@ -19,9 +19,10 @@ allowed-tools: task prepare_skill_workflow merge_subagent_results
 
 ## 执行流程
 
-开始前必须调用 `prepare_skill_workflow` 规范化搜索线索和最大回看窗口。
+开始前必须调用 `prepare_skill_workflow` 规范化 `search_criteria` 和最大回看窗口。
 
-1. 委派 `mailbox-reader` 调用 `search_emails` 或 `get_unanswered_emails` 定位唯一目标。
+1. 委派 `mailbox-reader` 调用 `search_skill_emails` 或 `get_unanswered_emails`
+   定位唯一目标；Skill 搜索必须传入 `skill_name="draft-reply-from-email-context"`。
 2. 对选定邮件 ID 调用 `get_email` 获取完整上下文。
 3. 目标不唯一时停止并要求用户选择，不能随机选取。
 4. 委派 `mail-writer` 调用 `prepare_email_draft`，设置收件人、主题、正文和 `reply_to_email_id`。

@@ -14,7 +14,6 @@ from ..calendar import ApprovalService
 from ..config import AuthContext
 from ..content_tools import AttachmentTextService, UnsubscribeService
 from ..contracts import CalendarProvider, MailProvider
-from ..model import build_model
 from ..persistence import (
     MEMORY_PATHS,
     AgentPersistence,
@@ -80,23 +79,30 @@ def build_email_agent_runtime(
     attachment_service: AttachmentTextService,
     approvals: ApprovalService,
     auth: AuthContext,
+    model: BaseChatModel,
+    user_timezone: str = "Asia/Shanghai",
     unsubscribe_service: UnsubscribeService | None = None,
-    model: BaseChatModel | None = None,
     definitions: LoadedAgentDefinitions | None = None,
     skill_bundle: SkillBundle | None = None,
     persistence: AgentPersistence | None = None,
 ) -> EmailAgentRuntime:
     """按受校验的外部定义装配 Supervisor 和三个最小权限子代理。"""
-    effective_model = model or build_model()
     effective_definitions = definitions or load_agent_definitions()
     effective_skills = skill_bundle or load_skill_bundle()
     effective_persistence = persistence or build_in_memory_persistence()
     memory_service = UserMemoryService(effective_persistence.store, auth)
     mail_writes = ApprovedMailService(mail_provider, approvals, auth)
-    reader_tools = build_mailbox_tools(mail_provider, attachment_service)
+    reader_tools = build_mailbox_tools(
+        mail_provider,
+        attachment_service,
+        user_timezone=user_timezone,
+    )
     writer_tools = build_mail_writer_tools(mail_writes, unsubscribe_service, auth)
     calendar_tools = build_calendar_tools(calendar_provider, auth)
-    supervisor_tools = build_supervisor_tools(memory_service)
+    supervisor_tools = build_supervisor_tools(
+        memory_service,
+        user_timezone=user_timezone,
+    )
     registries = {
         MAILBOX_READER: _tool_registry(reader_tools),
         MAIL_WRITER: _tool_registry(writer_tools),
@@ -125,7 +131,7 @@ def build_email_agent_runtime(
         }
     )
     agent = create_deep_agent(
-        model=effective_model,
+        model=model,
         tools=list(main_tools),
         system_prompt=effective_definitions.supervisor.system_prompt,
         subagents=subagents,

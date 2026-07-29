@@ -19,7 +19,7 @@ from ..agents import AgentTaskResult, AgentTaskStatus, EmailAgentRuntime, mail_a
 from ..calendar import ApprovalAction
 from ..content_tools import UnsubscribeCandidate, UnsubscribeMethod
 from ..contracts import CalendarEventInput, SendEmailRequest
-from ..observability import ObservationContext, Observability, hash_reference
+from ..observability import Observability, ObservationContext, hash_reference
 from .errors import (
     bad_request,
     conflict,

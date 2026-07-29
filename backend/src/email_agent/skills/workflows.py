@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from types import MappingProxyType
+from zoneinfo import ZoneInfo
 
 from pydantic import Field
 
-from ..contracts import ContractModel
+from ..contracts import (
+    ContractModel,
+    EmailSearchCriteria,
+    EmailSearchFolder,
+)
 
 URGENT_QUERY_TERMS = (
     "urgent",
@@ -51,23 +57,25 @@ SKILL_DELEGATED_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
         "weekly-email-summary": frozenset(
             {
                 "get_mailbox_identity",
-                "search_emails",
+                "search_skill_emails",
                 "get_unanswered_emails",
                 "list_calendar_events",
             }
         ),
-        "urgent-email-triage": frozenset({"search_emails", "get_email", "get_unanswered_emails"}),
-        "bug-issue-triage": frozenset({"search_emails", "get_email"}),
+        "urgent-email-triage": frozenset(
+            {"search_skill_emails", "get_email", "get_unanswered_emails"}
+        ),
+        "bug-issue-triage": frozenset({"search_skill_emails", "get_email"}),
         "resume-candidate-review": frozenset(
             {
-                "search_emails",
+                "search_skill_emails",
                 "list_email_attachments",
                 "extract_attachment_text",
             }
         ),
         "draft-reply-from-email-context": frozenset(
             {
-                "search_emails",
+                "search_skill_emails",
                 "get_unanswered_emails",
                 "get_email",
                 "prepare_email_draft",
@@ -75,11 +83,11 @@ SKILL_DELEGATED_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "send-prepared-email": frozenset({"send_email"}),
         "unsubscribe-discovery": frozenset(
-            {"search_emails", "get_email", "discover_email_unsubscribe"}
+            {"search_skill_emails", "get_email", "discover_email_unsubscribe"}
         ),
         "unsubscribe-execute": frozenset(
             {
-                "search_emails",
+                "search_skill_emails",
                 "get_email",
                 "discover_email_unsubscribe",
                 "execute_unsubscribe",
@@ -110,7 +118,9 @@ class SkillWorkflowPlan(ContractModel):
     skill_name: str
     days: int | None = None
     max_results: int = Field(ge=1, le=250)
-    search_query: str | None = None
+    search_criteria: EmailSearchCriteria | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
     delegated_tools: tuple[str, ...]
     notes: tuple[str, ...] = ()
 
@@ -121,6 +131,8 @@ def prepare_skill_workflow(
     days: int | None = None,
     max_results: int | None = None,
     query: str | None = None,
+    timezone: str = "Asia/Shanghai",
+    now: datetime | None = None,
 ) -> SkillWorkflowPlan:
     """规范化 Skill 参数并生成不可由 Prompt 随意放大的查询计划。"""
     if skill_name not in _WINDOWS:
@@ -129,15 +141,22 @@ def prepare_skill_workflow(
     normalized_days = _clamp_optional(days, default_days, maximum_days)
     normalized_results = max(1, min(max_results or default_results, 250))
     normalized_query = " ".join((query or "").strip().split())
+    window_start, window_end = _time_window(
+        normalized_days,
+        timezone=timezone,
+        now=now,
+    )
     return SkillWorkflowPlan(
         skill_name=skill_name,
         days=normalized_days,
         max_results=normalized_results,
-        search_query=_build_query(
+        search_criteria=_build_search_criteria(
             skill_name,
-            days=normalized_days,
+            since=window_start,
             query=normalized_query,
         ),
+        window_start=window_start,
+        window_end=window_end,
         delegated_tools=tuple(sorted(SKILL_DELEGATED_TOOLS[skill_name])),
         notes=_workflow_notes(skill_name),
     )
@@ -153,44 +172,75 @@ def _clamp_optional(
     return max(1, min(value if value is not None else default, maximum))
 
 
-def _build_query(
+def _build_search_criteria(
     skill_name: str,
     *,
-    days: int | None,
+    since: datetime | None,
     query: str,
-) -> str | None:
+) -> EmailSearchCriteria | None:
     if skill_name == "weekly-email-summary":
-        return f"newer_than:{days}d"
+        return EmailSearchCriteria(folder=EmailSearchFolder.ANY, since=since)
     if skill_name == "urgent-email-triage":
-        return _inbox_query(days, URGENT_QUERY_TERMS)
+        return _inbox_criteria(since, URGENT_QUERY_TERMS)
     if skill_name == "bug-issue-triage":
-        return _inbox_query(days, BUG_QUERY_TERMS)
+        return _inbox_criteria(since, BUG_QUERY_TERMS)
     if skill_name == "resume-candidate-review":
-        return query or _inbox_query(days, RESUME_QUERY_TERMS)
+        return _inbox_criteria(
+            since,
+            () if query else RESUME_QUERY_TERMS,
+            query=query or None,
+        )
     if skill_name == "draft-reply-from-email-context":
-        return _scoped_user_query(query, days) if query else None
+        return (
+            EmailSearchCriteria(
+                folder=EmailSearchFolder.INBOX,
+                since=since,
+                query=query,
+            )
+            if query
+            else None
+        )
     if skill_name == "unsubscribe-discovery":
-        return _inbox_query(days, UNSUBSCRIBE_QUERY_TERMS)
+        return _inbox_criteria(since, UNSUBSCRIBE_QUERY_TERMS)
     if skill_name == "unsubscribe-execute" and query:
-        return _scoped_user_query(
-            f"({query}) ({' OR '.join(UNSUBSCRIBE_QUERY_TERMS)})",
-            days,
+        return _inbox_criteria(
+            since,
+            UNSUBSCRIBE_QUERY_TERMS,
+            query=query,
         )
     return None
 
 
-def _inbox_query(days: int | None, terms: tuple[str, ...]) -> str:
-    return f"in:inbox newer_than:{days}d ({' OR '.join(terms)})"
+def _inbox_criteria(
+    since: datetime | None,
+    terms: tuple[str, ...],
+    *,
+    query: str | None = None,
+) -> EmailSearchCriteria:
+    return EmailSearchCriteria(
+        folder=EmailSearchFolder.INBOX,
+        since=since,
+        query=query,
+        keywords=tuple(term.strip('"') for term in terms),
+    )
 
 
-def _scoped_user_query(query: str, days: int | None) -> str:
-    lowered = query.casefold()
-    if any(
-        token in lowered
-        for token in ("newer_than:", "after:", "before:", "in:inbox", "in:anywhere")
-    ):
-        return query
-    return f"in:inbox newer_than:{days}d ({query})"
+def _time_window(
+    days: int | None,
+    *,
+    timezone: str,
+    now: datetime | None,
+) -> tuple[datetime | None, datetime | None]:
+    if days is None:
+        return None, None
+    zone = ZoneInfo(timezone)
+    if now is None:
+        end = datetime.now(zone)
+    else:
+        if now.tzinfo is None:
+            raise ValueError("工作流当前时间必须包含时区")
+        end = now.astimezone(zone)
+    return end - timedelta(days=days), end
 
 
 def _workflow_notes(skill_name: str) -> tuple[str, ...]:

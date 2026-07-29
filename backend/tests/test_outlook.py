@@ -9,6 +9,7 @@ import pytest
 
 from email_agent.config import Settings
 from email_agent.contracts import (
+    EmailSearchCriteria,
     MailProvider,
     ProviderAuthenticationError,
     ProviderNotFoundError,
@@ -91,7 +92,10 @@ def test_identity_lists_search_pagination_and_capabilities() -> None:
         provider = OutlookProvider(_client(handler), access_token="access-token")
         identity = await provider.get_identity()
         inbox = await provider.read_inbox(limit=2, unread_only=True)
-        searched = await provider.search_emails(query="项目进展", limit=1)
+        searched = await provider.search_emails(
+            criteria=EmailSearchCriteria(query="项目进展"),
+            limit=1,
+        )
         sent = await provider.get_sent_emails(limit=1)
 
         assert (identity.email, identity.display_name) == ("me@example.com", "本地用户")

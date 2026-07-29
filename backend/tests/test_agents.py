@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
+from pydantic import ValidationError
 
 from email_agent.agents import (
     CALENDAR_AGENT,
@@ -31,7 +32,12 @@ from email_agent.content_tools import (
     UnsubscribeResultStatus,
     UnsubscribeSource,
 )
-from email_agent.contracts import CalendarEvent, CalendarEventInput, SendEmailRequest
+from email_agent.contracts import (
+    CalendarEvent,
+    CalendarEventInput,
+    EmailSearchFolder,
+    SendEmailRequest,
+)
 from email_agent.skills import EMAIL_SKILL_SOURCE, EMAIL_SKILLS
 
 
@@ -133,7 +139,9 @@ def test_supervisor_workflow_tool_enforces_skill_limits() -> None:
 
     assert result["days"] == 7
     assert result["max_results"] == 250
-    assert result["search_query"].startswith("in:inbox newer_than:7d")
+    assert result["search_criteria"]["folder"] == "inbox"
+    assert "urgent" in result["search_criteria"]["keywords"]
+    assert result["window_start"] < result["window_end"]
 
 
 def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> None:
@@ -145,6 +153,7 @@ def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> Non
     assert {
         "read_inbox",
         "search_emails",
+        "search_skill_emails",
         "get_email",
         "extract_attachment_text",
         "discover_email_unsubscribe",
@@ -173,6 +182,54 @@ def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> Non
         "update_calendar_event": True,
         "delete_calendar_event": True,
     }
+
+
+def test_list_tools_preserve_empty_results_in_structured_envelopes() -> None:
+    runtime, _, _, _, _ = _build_runtime()
+    mailbox_tool = _tool(runtime, MAILBOX_READER, "get_unanswered_emails")
+    calendar_tool = _tool(runtime, CALENDAR_AGENT, "list_calendar_events")
+    start_at = datetime(2026, 7, 22, 9, tzinfo=UTC)
+
+    mailbox_result = asyncio.run(mailbox_tool.ainvoke({"limit": 5}))
+    calendar_result = asyncio.run(
+        calendar_tool.ainvoke(
+            {
+                "start_at": start_at.isoformat(),
+                "end_at": (start_at + timedelta(days=7)).isoformat(),
+            }
+        )
+    )
+
+    assert mailbox_result == {"items": [], "count": 0}
+    assert calendar_result == {"items": [], "count": 0}
+
+
+def test_skill_search_rebuilds_provider_criteria_on_server() -> None:
+    runtime, mail, _, _, _ = _build_runtime()
+    tool = _tool(runtime, MAILBOX_READER, "search_skill_emails")
+
+    result = asyncio.run(
+        tool.ainvoke(
+            {
+                "skill_name": "weekly-email-summary",
+                "days": 7,
+                "max_results": 5,
+                "include_unanswered": True,
+            }
+        )
+    )
+
+    criteria = mail.search_emails.await_args.kwargs["criteria"]
+    assert criteria.folder is EmailSearchFolder.ANY
+    assert criteria.query is None
+    assert criteria.keywords == ()
+    assert mail.search_emails.await_args.kwargs["limit"] == 5
+    unanswered_since = mail.get_unanswered_emails.await_args.kwargs["since"]
+    assert unanswered_since is not None
+    assert mail.get_unanswered_emails.await_args.kwargs["limit"] == 5
+    assert result["criteria"]["folder"] == "any"
+    assert result["criteria"]["keywords"] == []
+    assert result["unanswered"] == {"items": [], "count": 0}
 
 
 def test_memory_tool_uses_versioned_current_user_store() -> None:
@@ -430,6 +487,33 @@ def test_merge_task_results_preserves_failed_and_partial_states() -> None:
     assert partial.failures == ("审批凭证无效",)
     assert "[failed] 日历写入失败" in partial.summary
     assert all_failed.status is AgentTaskStatus.FAILED
+
+
+def test_agent_task_result_discards_provider_analysis_only() -> None:
+    result = AgentTaskResult.model_validate(
+        {
+            "status": "success",
+            "summary": "处理完成",
+            "evidence": [],
+            "failures": [],
+            "analysis": "不应进入公开结果",
+        }
+    )
+
+    assert result.model_dump(mode="json") == {
+        "status": "success",
+        "summary": "处理完成",
+        "evidence": [],
+        "failures": [],
+    }
+    with pytest.raises(ValidationError):
+        AgentTaskResult.model_validate(
+            {
+                "status": "success",
+                "summary": "处理完成",
+                "unexpected": "仍然必须拒绝",
+            }
+        )
 
 
 def test_merge_task_results_rejects_empty_execution() -> None:

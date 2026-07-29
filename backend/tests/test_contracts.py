@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from email_agent.contracts import (
     CalendarEventInput,
     CalendarProvider,
+    EmailSearchCriteria,
     MailProvider,
     ProviderCapabilities,
     ProviderName,
@@ -52,6 +53,14 @@ def test_send_email_requires_recipient_subject_and_body() -> None:
     """发送契约在调用 Provider 前拒绝不完整邮件。"""
     with pytest.raises(ValidationError):
         SendEmailRequest(to=(), subject="", body="")
+
+
+def test_email_search_requires_aware_time_and_unique_keywords() -> None:
+    with pytest.raises(ValidationError, match="时区"):
+        EmailSearchCriteria(since=datetime(2026, 7, 29, 12))
+
+    with pytest.raises(ValidationError, match="不能重复"):
+        EmailSearchCriteria(keywords=("Urgent", "urgent"))
 
 
 def test_provider_errors_expose_retry_policy() -> None:

@@ -19,9 +19,11 @@ allowed-tools: task prepare_skill_workflow merge_subagent_results
 
 ## 执行流程
 
-开始前必须调用 `prepare_skill_workflow`，不得由模型自行扩大关键词或时间范围。
+开始前必须调用 `prepare_skill_workflow`，并原样使用返回的 `search_criteria`；
+不得由模型自行扩大关键词或时间范围。
 
-1. 委派 `mailbox-reader` 调用 `search_emails` 执行工程问题查询。
+1. 委派 `mailbox-reader` 调用 `search_skill_emails`，传入
+   `skill_name="bug-issue-triage"` 和原始参数，由服务端执行工程问题查询。
 2. 对每个匹配邮件 ID 委派调用 `get_email` 获取完整正文。
 3. 使用 `merge_subagent_results` 聚合搜索与正文读取结果。
 4. 按生产事故或宕机、阻断性回归、构建或测试失败、一般缺陷信息排序。

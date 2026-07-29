@@ -1,9 +1,10 @@
 """Agent 跨步骤结果契约与确定性聚合规则。"""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from ..contracts import ContractModel
 
@@ -23,6 +24,14 @@ class AgentTaskResult(ContractModel):
     summary: str = Field(min_length=1, max_length=5000)
     evidence: tuple[str, ...] = Field(default=(), max_length=100)
     failures: tuple[str, ...] = Field(default=(), max_length=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_provider_output(cls, value: Any) -> Any:
+        """丢弃模型网关附加的 analysis，不改变公开结果契约。"""
+        if isinstance(value, Mapping) and "analysis" in value:
+            return {key: item for key, item in value.items() if key != "analysis"}
+        return value
 
 
 def merge_task_results(results: Sequence[AgentTaskResult]) -> AgentTaskResult:

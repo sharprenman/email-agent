@@ -16,10 +16,11 @@ class ContractModel(BaseModel):
 
 
 class ProviderName(StrEnum):
-    """首期支持的外部服务。"""
+    """支持的外部服务。"""
 
     GMAIL = "gmail"
     OUTLOOK = "outlook"
+    ALIMAIL = "alimail"
 
 
 class ProviderCapabilities(ContractModel):
@@ -59,6 +60,39 @@ class EmailMessage(EmailSummary):
     body_text: str = ""
     body_html: str | None = None
     headers: Mapping[str, str] = Field(default_factory=dict)
+
+
+class EmailSearchFolder(StrEnum):
+    """Provider 无关的邮件搜索范围。"""
+
+    ANY = "any"
+    INBOX = "inbox"
+
+
+class EmailSearchCriteria(ContractModel):
+    """由各 Provider 翻译执行的统一邮件搜索条件。"""
+
+    folder: EmailSearchFolder = EmailSearchFolder.ANY
+    since: datetime | None = None
+    query: str | None = Field(default=None, min_length=1, max_length=500)
+    keywords: tuple[str, ...] = Field(default=(), max_length=20)
+
+    @field_validator("since")
+    @classmethod
+    def validate_since(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("邮件搜索起始时间必须包含时区")
+        return value
+
+    @field_validator("keywords")
+    @classmethod
+    def validate_keywords(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(value.strip() for value in values)
+        if any(not value or len(value) > 100 for value in normalized):
+            raise ValueError("邮件搜索关键词长度无效")
+        if len({value.casefold() for value in normalized}) != len(normalized):
+            raise ValueError("邮件搜索关键词不能重复")
+        return normalized
 
 
 class Attachment(ContractModel):
@@ -248,7 +282,7 @@ class UnsupportedCapabilityError(ProviderError):
 
 @runtime_checkable
 class MailProvider(Protocol):
-    """Gmail 与 Outlook 必须共同实现的异步邮件接口。"""
+    """所有邮件 Provider 必须共同实现的异步接口。"""
 
     @property
     def capabilities(self) -> ProviderCapabilities: ...
@@ -262,13 +296,23 @@ class MailProvider(Protocol):
         unread_only: bool = False,
     ) -> Sequence[EmailSummary]: ...
 
-    async def search_emails(self, *, query: str, limit: int) -> Sequence[EmailSummary]: ...
+    async def search_emails(
+        self,
+        *,
+        criteria: EmailSearchCriteria,
+        limit: int,
+    ) -> Sequence[EmailSummary]: ...
 
     async def get_email(self, email_id: str) -> EmailMessage: ...
 
     async def get_sent_emails(self, *, limit: int) -> Sequence[EmailSummary]: ...
 
-    async def get_unanswered_emails(self, *, limit: int) -> Sequence[EmailSummary]: ...
+    async def get_unanswered_emails(
+        self,
+        *,
+        limit: int,
+        since: datetime | None = None,
+    ) -> Sequence[EmailSummary]: ...
 
     async def list_attachments(self, email_id: str) -> Sequence[Attachment]: ...
 
@@ -283,7 +327,7 @@ class MailProvider(Protocol):
 
 @runtime_checkable
 class CalendarProvider(Protocol):
-    """Google 与 Microsoft 日历必须共同实现的异步接口。"""
+    """所有日历 Provider 必须共同实现的异步接口。"""
 
     @property
     def capabilities(self) -> ProviderCapabilities: ...

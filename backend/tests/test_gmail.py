@@ -13,6 +13,7 @@ from httplib2 import Response
 
 from email_agent.config import Settings
 from email_agent.contracts import (
+    EmailSearchCriteria,
     ProviderAuthenticationError,
     ProviderNotFoundError,
     ProviderPermissionError,
@@ -100,8 +101,9 @@ def test_list_identity_inbox_search_and_sent() -> None:
     assert asyncio.run(provider.read_inbox(limit=2, unread_only=True))[0].is_read is False
     assert messages.list.call_args.kwargs["labelIds"] == ["INBOX"]
     assert messages.list.call_args.kwargs["q"] == "is:unread"
-    assert len(asyncio.run(provider.search_emails(query="from:sender", limit=2))) == 1
-    assert messages.list.call_args.kwargs["q"] == "from:sender"
+    criteria = EmailSearchCriteria(query="from:sender")
+    assert len(asyncio.run(provider.search_emails(criteria=criteria, limit=2))) == 1
+    assert messages.list.call_args.kwargs["q"] == "(from:sender)"
     assert len(asyncio.run(provider.get_sent_emails(limit=2))) == 1
     assert messages.list.call_args.kwargs["labelIds"] == ["SENT"]
 

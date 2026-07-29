@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.store.memory import InMemoryStore
 
+from email_agent.agents import AgentTaskResult, AgentTaskStatus
 from email_agent.config import AuthContext
 from email_agent.persistence import (
     MEMORY_PATHS,
@@ -44,6 +45,20 @@ class _ToolCapableFakeModel(GenericFakeChatModel):
 
 def _profile(name: str) -> str:
     return f"# 用户画像\n\n## 基本偏好\n- 称呼：{name}"
+
+
+def test_checkpointer_explicitly_allows_agent_result_types() -> None:
+    checkpointer = build_in_memory_persistence().checkpointer
+    result = AgentTaskResult(
+        status=AgentTaskStatus.SUCCESS,
+        summary="读取成功",
+    )
+
+    serialized = checkpointer.serde.dumps_typed(result)
+    restored = checkpointer.serde.loads_typed(serialized)
+
+    assert restored == result
+    assert isinstance(restored, AgentTaskResult)
 
 
 def test_same_user_reads_memory_across_threads_while_other_user_is_isolated() -> None:

@@ -18,12 +18,13 @@ def build_calendar_tools(
     async def list_calendar_events(
         start_at: datetime,
         end_at: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """读取指定时间窗口的日历事件。"""
-        return [
+        items = [
             item.model_dump(mode="json")
             for item in await provider.list_events(start_at=start_at, end_at=end_at)
         ]
+        return {"items": items, "count": len(items)}
 
     async def create_calendar_event(
         event: CalendarEventInput,

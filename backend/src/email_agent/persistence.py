@@ -16,10 +16,12 @@ from deepagents.backends import StoreBackend
 from deepagents.backends.protocol import EditResult, ReadResult, WriteResult
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, ConfigDict, Field
 
+from .agents.results import AgentTaskResult, AgentTaskStatus
 from .config import AuthContext
 
 MEMORY_ROOT = "/memories/"
@@ -39,6 +41,9 @@ _FORBIDDEN_MEMORY_TEXT = (
     "覆盖系统",
     "<|",
     "|>",
+)
+_CHECKPOINT_SERIALIZER = JsonPlusSerializer(
+    allowed_msgpack_modules=(AgentTaskResult, AgentTaskStatus),
 )
 
 
@@ -98,7 +103,7 @@ class AgentPersistence:
 def build_in_memory_persistence() -> AgentPersistence:
     """构建仅供测试或本地进程使用的非持久化资源。"""
     return AgentPersistence(
-        checkpointer=InMemorySaver(),
+        checkpointer=InMemorySaver(serde=_CHECKPOINT_SERIALIZER),
         store=InMemoryStore(),
     )
 
@@ -112,7 +117,10 @@ async def open_postgres_persistence(database_url: str) -> AsyncIterator[AgentPer
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
     from langgraph.store.postgres import PostgresStore
 
-    async with AsyncPostgresSaver.from_conn_string(database_url) as checkpointer:
+    async with AsyncPostgresSaver.from_conn_string(
+        database_url,
+        serde=_CHECKPOINT_SERIALIZER,
+    ) as checkpointer:
         with PostgresStore.from_conn_string(
             database_url,
             pool_config={"min_size": 1, "max_size": 10},

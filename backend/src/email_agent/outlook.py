@@ -15,6 +15,8 @@ from .contracts import (
     Attachment,
     Contact,
     EmailMessage,
+    EmailSearchCriteria,
+    EmailSearchFolder,
     EmailSummary,
     MailboxIdentity,
     ProviderAuthenticationError,
@@ -103,21 +105,47 @@ class OutlookProvider:
             params.pop("$orderby")
         return await self._list_summaries("/me/mailFolders/inbox/messages", limit, params=params)
 
-    async def search_emails(self, *, query: str, limit: int) -> Sequence[EmailSummary]:
-        """使用 Microsoft Graph 邮件搜索查询。"""
-        if not query.strip():
-            raise ValueError("Outlook 搜索条件不能为空")
-        params = {
-            "$search": f'"{query.strip()}"',
-            "$top": str(limit),
-            "$select": SUMMARY_FIELDS,
-        }
-        return await self._list_summaries(
-            "/me/messages",
-            limit,
-            params=params,
-            headers={"ConsistencyLevel": "eventual"},
+    async def search_emails(
+        self,
+        *,
+        criteria: EmailSearchCriteria,
+        limit: int,
+    ) -> Sequence[EmailSummary]:
+        """把统一搜索条件翻译为 Microsoft Graph 查询。"""
+        _validate_limit(limit)
+        path = (
+            "/me/mailFolders/inbox/messages"
+            if criteria.folder is EmailSearchFolder.INBOX
+            else "/me/messages"
         )
+        search_text = _outlook_search_text(criteria)
+        scan_limit = 100 if criteria.since is not None else limit
+        headers: Mapping[str, str] | None = None
+        if search_text:
+            params = {
+                "$search": f'"{search_text}"',
+                "$top": str(scan_limit),
+                "$select": SUMMARY_FIELDS,
+            }
+            headers = {"ConsistencyLevel": "eventual"}
+        else:
+            params = _message_list_params(scan_limit)
+            if criteria.since is not None:
+                params["$filter"] = (
+                    "receivedDateTime ge "
+                    f"{criteria.since.isoformat().replace('+00:00', 'Z')}"
+                )
+        summaries = await self._list_summaries(
+            path,
+            scan_limit,
+            params=params,
+            headers=headers,
+        )
+        return [
+            item
+            for item in summaries
+            if criteria.since is None or item.sent_at >= criteria.since
+        ][:limit]
 
     async def get_email(self, email_id: str) -> EmailMessage:
         """读取完整 Outlook 邮件正文和标准化头信息。"""
@@ -132,14 +160,25 @@ class OutlookProvider:
             params=_message_list_params(limit),
         )
 
-    async def get_unanswered_emails(self, *, limit: int) -> Sequence[EmailSummary]:
+    async def get_unanswered_emails(
+        self,
+        *,
+        limit: int,
+        since: datetime | None = None,
+    ) -> Sequence[EmailSummary]:
         """返回最后一封消息来自对方的 Outlook 会话。"""
         _validate_limit(limit)
         identity = (await self.get_identity()).email.casefold()
+        candidate_params = _message_list_params(min(limit * 3, 100))
+        if since is not None:
+            candidate_params["$filter"] = (
+                "receivedDateTime ge "
+                f"{since.isoformat().replace('+00:00', 'Z')}"
+            )
         candidates = await self._list_raw(
             "/me/mailFolders/inbox/messages",
             min(limit * 3, 100),
-            params=_message_list_params(min(limit * 3, 100)),
+            params=candidate_params,
         )
         conversation_ids = list(
             dict.fromkeys(
@@ -161,7 +200,10 @@ class OutlookProvider:
             if not messages:
                 continue
             latest = _parse_summary(max(messages, key=_received_at))
-            if latest.sender.casefold() != identity:
+            if (
+                latest.sender.casefold() != identity
+                and (since is None or latest.sent_at >= since)
+            ):
                 results.append(latest)
             if len(results) == limit:
                 break
@@ -477,6 +519,15 @@ def _message_list_params(limit: int) -> dict[str, str]:
         "$select": SUMMARY_FIELDS,
         "$orderby": "receivedDateTime desc",
     }
+
+
+def _outlook_search_text(criteria: EmailSearchCriteria) -> str:
+    parts: list[str] = []
+    if criteria.query:
+        parts.append(criteria.query.replace('"', ""))
+    if criteria.keywords:
+        parts.append(" OR ".join(value.replace('"', "") for value in criteria.keywords))
+    return " ".join(f"({part})" for part in parts)
 
 
 def _parse_message(raw: Mapping[str, Any]) -> EmailMessage:

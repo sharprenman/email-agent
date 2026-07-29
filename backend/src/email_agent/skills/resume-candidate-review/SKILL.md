@@ -19,9 +19,10 @@ allowed-tools: task prepare_skill_workflow merge_subagent_results
 
 ## 执行流程
 
-开始前必须调用 `prepare_skill_workflow` 规范化候选人查询、时间范围和结果上限。
+开始前必须调用 `prepare_skill_workflow` 获取候选人的 `search_criteria`、时间范围和结果上限。
 
-1. 委派 `mailbox-reader` 调用 `search_emails` 定位候选人邮件；已有邮件 ID 时跳过宽泛扫描。
+1. 委派 `mailbox-reader` 调用 `search_skill_emails`，传入
+   `skill_name="resume-candidate-review"` 和原始参数定位候选人邮件；已有邮件 ID 时跳过扫描。
 2. 对候选邮件调用 `list_email_attachments`。
 3. 只对支持且大小合规的简历附件调用 `extract_attachment_text`。
 4. 将回复或已发送跟进视为线程上下文，不重复创建候选人。

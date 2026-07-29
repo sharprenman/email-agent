@@ -30,6 +30,7 @@ _MAXIMUM_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "get_mailbox_identity",
                 "read_inbox",
                 "search_emails",
+                "search_skill_emails",
                 "get_email",
                 "get_sent_emails",
                 "get_unanswered_emails",

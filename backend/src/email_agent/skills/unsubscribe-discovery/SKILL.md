@@ -19,9 +19,10 @@ allowed-tools: task prepare_skill_workflow merge_subagent_results
 
 ## 执行流程
 
-开始前必须调用 `prepare_skill_workflow` 获取受限查询、时间窗口和结果上限。
+开始前必须调用 `prepare_skill_workflow` 获取受限 `search_criteria`、时间窗口和结果上限。
 
-1. 委派 `mailbox-reader` 调用 `search_emails` 查找可能的订阅邮件。
+1. 委派 `mailbox-reader` 调用 `search_skill_emails`，传入
+   `skill_name="unsubscribe-discovery"` 和原始参数查找可能的订阅邮件。
 2. 对候选邮件调用 `get_email`，获取标准头、正文和 DKIM 证据。
 3. 对每封邮件调用 `discover_email_unsubscribe`，确定退订方式与候选指纹。
 4. 按发件人或域名归组，保留代表邮件 ID 和可用方式。

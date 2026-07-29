@@ -1,6 +1,8 @@
 """DeepAgents 九类业务 Skill 的资源、契约与安全测试。"""
 
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from deepagents import create_deep_agent
@@ -9,6 +11,7 @@ from deepagents.middleware.skills import SkillsMiddleware
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
+from email_agent.contracts import EmailSearchFolder
 from email_agent.skills import (
     EMAIL_SKILL_SOURCE,
     EMAIL_SKILLS,
@@ -102,6 +105,39 @@ def test_each_skill_declares_empty_failure_and_result_rules(skill_name: str) -> 
     assert "## 安全边界" in content
 
 
+def test_weekly_skill_groups_reads_by_subagent_and_uses_past_window() -> None:
+    bundle = load_skill_bundle()
+    content = bundle.files[
+        f"{EMAIL_SKILL_SOURCE}weekly-email-summary/SKILL.md"
+    ]["content"]
+
+    assert "只委派一次 `mailbox-reader`" in content
+    assert "只有用户明确要求日程、日历或会议摘要时" in content
+    assert "只要求邮件摘要时不得额外查询日历" in content
+    assert "向前回溯 `days` 天" in content
+    assert '`skill_name="weekly-email-summary"`' in content
+    assert "`include_unanswered=true`" in content
+
+
+@pytest.mark.parametrize(
+    "skill_name",
+    (
+        "weekly-email-summary",
+        "urgent-email-triage",
+        "bug-issue-triage",
+        "resume-candidate-review",
+        "draft-reply-from-email-context",
+        "unsubscribe-discovery",
+        "unsubscribe-execute",
+    ),
+)
+def test_searching_skills_use_server_validated_search_tool(skill_name: str) -> None:
+    bundle = load_skill_bundle()
+    content = bundle.files[f"{EMAIL_SKILL_SOURCE}{skill_name}/SKILL.md"]["content"]
+
+    assert "search_skill_emails" in content
+
+
 def test_skill_files_are_injected_without_overwriting_caller_files() -> None:
     bundle = load_skill_bundle()
 
@@ -131,18 +167,29 @@ def test_each_skill_has_a_deterministic_workflow_plan(skill_name: str) -> None:
 
 
 def test_workflow_plan_clamps_windows_and_builds_queries() -> None:
-    urgent = prepare_skill_workflow("urgent-email-triage", days=60)
+    now = datetime(2026, 7, 29, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+    urgent = prepare_skill_workflow("urgent-email-triage", days=60, now=now)
     draft = prepare_skill_workflow(
         "draft-reply-from-email-context",
         days=60,
         query="subject:项目截止",
+        now=now,
     )
 
     assert urgent.days == 7
-    assert urgent.search_query is not None
-    assert urgent.search_query.startswith("in:inbox newer_than:7d")
+    assert urgent.search_criteria is not None
+    assert urgent.search_criteria.folder is EmailSearchFolder.INBOX
+    assert "urgent" in urgent.search_criteria.keywords
+    assert urgent.window_start == datetime(
+        2026, 7, 22, 12, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
+    assert urgent.window_end == now
     assert draft.days == 30
-    assert draft.search_query == "in:inbox newer_than:30d (subject:项目截止)"
+    assert draft.search_criteria is not None
+    assert draft.search_criteria.query == "subject:项目截止"
+    assert draft.search_criteria.since == datetime(
+        2026, 6, 29, 12, tzinfo=ZoneInfo("Asia/Shanghai")
+    )
 
 
 def test_workflow_plan_rejects_unknown_skill() -> None:

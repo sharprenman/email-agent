@@ -22,6 +22,8 @@ from .contracts import (
     Attachment,
     Contact,
     EmailMessage,
+    EmailSearchCriteria,
+    EmailSearchFolder,
     EmailSummary,
     MailboxIdentity,
     ProviderAuthenticationError,
@@ -88,11 +90,17 @@ class GmailProvider:
         query = "is:unread" if unread_only else None
         return await self._list_summaries(limit=limit, label_ids=["INBOX"], query=query)
 
-    async def search_emails(self, *, query: str, limit: int) -> Sequence[EmailSummary]:
-        """使用 Gmail 搜索语法查询邮件。"""
-        if not query.strip():
-            raise ValueError("Gmail 搜索条件不能为空")
-        return await self._list_summaries(limit=limit, query=query.strip())
+    async def search_emails(
+        self,
+        *,
+        criteria: EmailSearchCriteria,
+        limit: int,
+    ) -> Sequence[EmailSummary]:
+        """把统一搜索条件翻译为 Gmail 查询语法。"""
+        return await self._list_summaries(
+            limit=limit,
+            query=_gmail_search_query(criteria),
+        )
 
     async def get_email(self, email_id: str) -> EmailMessage:
         """读取完整邮件正文和标准化头信息。"""
@@ -103,16 +111,24 @@ class GmailProvider:
         """读取已发送邮件摘要。"""
         return await self._list_summaries(limit=limit, label_ids=["SENT"])
 
-    async def get_unanswered_emails(self, *, limit: int) -> Sequence[EmailSummary]:
+    async def get_unanswered_emails(
+        self,
+        *,
+        limit: int,
+        since: datetime | None = None,
+    ) -> Sequence[EmailSummary]:
         """返回最后一封消息来自对方的收件箱线程。"""
         _validate_limit(limit)
         identity = (await self.get_identity()).email.casefold()
+        query = "in:inbox"
+        if since is not None:
+            query += f" after:{since.date().isoformat().replace('-', '/')}"
         response = await self._execute(
             self._gmail.users()
             .messages()
             .list(
                 userId="me",
-                q="in:inbox",
+                q=query,
                 maxResults=min(limit * 3, 100),
                 includeSpamTrash=False,
             ),
@@ -135,7 +151,10 @@ class GmailProvider:
             if not messages:
                 continue
             latest = _parse_summary(messages[-1])
-            if _address(latest.sender).casefold() != identity:
+            if (
+                _address(latest.sender).casefold() != identity
+                and (since is None or latest.sent_at >= since)
+            ):
                 results.append(latest)
             if len(results) == limit:
                 break
@@ -451,6 +470,20 @@ def _required_string(payload: Mapping[str, Any], field: str) -> str:
 def _validate_limit(limit: int, *, maximum: int = 100) -> None:
     if not 1 <= limit <= maximum:
         raise ValueError(f"limit 必须在 1 到 {maximum} 之间")
+
+
+def _gmail_search_query(criteria: EmailSearchCriteria) -> str | None:
+    parts: list[str] = []
+    if criteria.folder is EmailSearchFolder.INBOX:
+        parts.append("in:inbox")
+    if criteria.since is not None:
+        parts.append(f"after:{criteria.since.date().isoformat().replace('-', '/')}")
+    if criteria.query:
+        parts.append(f"({criteria.query})")
+    if criteria.keywords:
+        terms = " OR ".join(f'"{value.replace(chr(34), "")}"' for value in criteria.keywords)
+        parts.append(f"({terms})")
+    return " ".join(parts) or None
 
 
 def _map_http_error(error: HttpError) -> Exception:

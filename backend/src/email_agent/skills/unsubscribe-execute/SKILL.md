@@ -19,9 +19,10 @@ allowed-tools: task prepare_skill_workflow merge_subagent_results
 
 ## 执行流程
 
-开始前必须调用 `prepare_skill_workflow` 规范化目标查询和执行安全说明。
+开始前必须调用 `prepare_skill_workflow` 获取目标 `search_criteria` 和执行安全说明。
 
-1. 必要时委派 `mailbox-reader` 调用 `search_emails` 定位唯一目标。
+1. 必要时委派 `mailbox-reader` 调用 `search_skill_emails`，传入
+   `skill_name="unsubscribe-execute"` 和原始参数定位唯一目标。
 2. 调用 `get_email` 和 `discover_email_unsubscribe` 重新获取最新候选，不能信任旧链接文本。
 3. website 或 unknown 方式只返回人工说明，不调用副作用工具。
 4. one_click 或 mailto 候选委派 `mail-writer` 调用 `execute_unsubscribe`。

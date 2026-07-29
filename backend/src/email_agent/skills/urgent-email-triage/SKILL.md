@@ -19,9 +19,11 @@ allowed-tools: task prepare_skill_workflow merge_subagent_results
 
 ## 执行流程
 
-开始前必须调用 `prepare_skill_workflow`，后续搜索只能使用其返回的查询和结果上限。
+开始前必须调用 `prepare_skill_workflow`，后续搜索只能原样使用其返回的
+`search_criteria` 和结果上限。
 
-1. 委派 `mailbox-reader` 调用 `search_emails` 执行限定时间和收件箱的紧急关键词查询。
+1. 委派 `mailbox-reader` 调用 `search_skill_emails`，传入
+   `skill_name="urgent-email-triage"` 和原始参数，由服务端执行限定时间及收件箱查询。
 2. 对每个匹配邮件 ID 委派调用 `get_email`，读取真实正文和头信息。
 3. 委派调用 `get_unanswered_emails`，补充没有命中关键词但仍等待回复的线程。
 4. 使用 `merge_subagent_results` 保留搜索、正文和待回复来源的独立状态。

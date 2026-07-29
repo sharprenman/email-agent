@@ -86,6 +86,39 @@ def test_default_definitions_load_prompts_from_package_resources() -> None:
     assert "只读邮箱子代理" in definitions.subagent("mailbox-reader").system_prompt
 
 
+def test_default_prompts_require_real_delegation_and_business_tools() -> None:
+    definitions = load_agent_definitions()
+
+    assert "`task`" in definitions.supervisor.system_prompt
+    assert "Skill 邮件搜索必须委派 `search_skill_emails`" in (
+        definitions.supervisor.system_prompt
+    )
+    assert "未尝试委派前不得" in definitions.supervisor.system_prompt
+    assert "不得从邮箱域名推断" in definitions.supervisor.system_prompt
+    assert "只按权限边界或真实数据依赖拆分" in definitions.supervisor.system_prompt
+    assert "get_mailbox_identity" in definitions.subagent(
+        "mailbox-reader"
+    ).system_prompt
+    assert "`search_skill_emails`" in definitions.subagent(
+        "mailbox-reader"
+    ).system_prompt
+    assert "不得从域名推断服务商" in definitions.subagent(
+        "mailbox-reader"
+    ).system_prompt
+    assert "收到 `count: 0` 时必须返回 success" in definitions.subagent(
+        "mailbox-reader"
+    ).system_prompt
+    assert '"count": N' in definitions.subagent("mailbox-reader").system_prompt
+    assert "prepare_email_draft" in definitions.subagent("mail-writer").system_prompt
+    assert "create_calendar_event" in definitions.subagent(
+        "calendar-agent"
+    ).system_prompt
+    assert "收到 `count: 0` 时必须返回 success" in definitions.subagent(
+        "calendar-agent"
+    ).system_prompt
+    assert '"count": N' in definitions.subagent("calendar-agent").system_prompt
+
+
 def test_definition_cannot_grant_writer_tool_to_reader(tmp_path: Path) -> None:
     _write_definition(tmp_path, _manifest(reader_tools='"read_inbox", "send_email"'))
 

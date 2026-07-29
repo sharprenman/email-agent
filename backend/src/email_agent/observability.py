@@ -49,7 +49,7 @@ class ObservationContext:
     user_ref: str
     thread_id: str | None = None
 
-    def with_thread(self, thread_id: str) -> "ObservationContext":
+    def with_thread(self, thread_id: str) -> ObservationContext:
         """为上下文补充线程标识。"""
         return ObservationContext(
             trace_id=self.trace_id,
@@ -275,7 +275,7 @@ class Observability:
         operation: str,
         agent_name: str | None = None,
         tool_name: str | None = None,
-    ) -> "_ObservedOperation":
+    ) -> _ObservedOperation:
         """统计并追踪一次操作，异常日志只记录异常类型。"""
         return _ObservedOperation(
             self,
@@ -363,7 +363,7 @@ class Observability:
             duration_ms=0,
         )
 
-    def callback(self, context: ObservationContext) -> "ObservabilityCallbackHandler":
+    def callback(self, context: ObservationContext) -> ObservabilityCallbackHandler:
         """创建只观察名称和耗时的 LangChain 回调。"""
         return ObservabilityCallbackHandler(self, context)
 
