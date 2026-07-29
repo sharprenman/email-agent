@@ -89,9 +89,45 @@ class AliMailClient:
                 raise ProviderUnavailableError("阿里邮箱开放平台返回了无效 JSON")
             return payload
 
+    async def get_download_location(self, path: str) -> str:
+        """读取附件下载会话返回的 HTTPS 地址。"""
+        token = await self._get_access_token()
+        refreshed = False
+        while True:
+            try:
+                response = await self._client.get(
+                    path,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            except httpx.TimeoutException as exc:
+                raise ProviderTimeoutError("阿里邮箱附件下载会话请求超时") from exc
+            except httpx.RequestError as exc:
+                raise ProviderUnavailableError("阿里邮箱附件下载会话暂时不可用") from exc
+            if response.status_code == 401 and not refreshed:
+                self._access_token = None
+                token = await self._get_access_token()
+                refreshed = True
+                continue
+            if response.is_error:
+                raise _map_http_error(response.status_code)
+            location = response.headers.get("location", "").strip()
+            if not location and response.content:
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise ProviderUnavailableError("阿里邮箱附件下载会话响应无效") from exc
+                if isinstance(payload, dict):
+                    location = str(payload.get("location") or "").strip()
+            if not location:
+                raise ProviderUnavailableError("阿里邮箱附件下载会话缺少地址")
+            return location
+
     async def download(self, location: str) -> bytes:
-        """下载开放平台签发的 HTTPS 附件地址。"""
-        if not location.startswith("https://"):
+        """下载开放平台签发的 HTTPS 地址或当前 Host 绝对路径。"""
+        if not (
+            location.startswith("https://")
+            or (location.startswith("/") and not location.startswith("//"))
+        ):
             raise ProviderUnavailableError("阿里邮箱返回了不安全的附件下载地址")
         try:
             response = await self._client.get(location)

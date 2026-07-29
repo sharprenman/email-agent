@@ -158,12 +158,11 @@ class AliMailProvider:
         """创建附件下载会话并读取临时 HTTPS 地址。"""
         email_id = _validated_id(email_id, "邮件")
         attachment_id = _validated_id(attachment_id, "附件")
-        response = await self._client.request(
-            "GET",
+        location = await self._client.get_download_location(
             f"{self._user_path}/messages/{quote(email_id, safe='')}/attachments/"
             f"{quote(attachment_id, safe='')}/$value",
         )
-        return await self._client.download(_required_string(response, "location"))
+        return await self._client.download(location)
 
     async def list_contacts(self, *, limit: int) -> Sequence[Contact]:
         """读取企业共享通讯录根分组联系人。"""
@@ -199,8 +198,9 @@ class AliMailProvider:
             idempotency_key,
             self._email,
         )
+        idempotency_digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
         headers = {
-            "X-Email-Agent-Idempotency-Key": hashlib.sha256(idempotency_key.encode()).hexdigest()
+            "X-Email-Agent-Idempotency-Key": idempotency_digest
         }
         if request.reply_to_email_id:
             original = await self._get_message(request.reply_to_email_id)
@@ -237,7 +237,7 @@ class AliMailProvider:
             json={"saveToSentItems": True},
             retry_read=False,
         )
-        return await self._resolve_sent_message_id(internet_message_id)
+        return await self._resolve_sent_message_id(internet_message_id, idempotency_digest)
 
     async def mark_read(self, email_id: str, *, idempotency_key: str) -> None:
         """将邮件标记为已读。"""
@@ -267,12 +267,25 @@ class AliMailProvider:
             raise ProviderUnavailableError("阿里邮箱邮件响应缺少 message")
         return message
 
-    async def _resolve_sent_message_id(self, internet_message_id: str) -> str:
+    async def _resolve_sent_message_id(
+        self,
+        internet_message_id: str,
+        idempotency_digest: str,
+    ) -> str:
         for attempt in range(3):
             messages = await self._list_folder(SENT_FOLDER_ID, 100)
-            for message in messages:
+            for message in messages[:10]:
+                message_id = _required_string(message, "id")
                 if message.get("internetMessageId") == internet_message_id:
-                    return _required_string(message, "id")
+                    return message_id
+                detail = await self._get_message(message_id)
+                headers = detail.get("internetMessageHeaders")
+                if isinstance(headers, Mapping) and any(
+                    str(name).casefold() == "x-email-agent-idempotency-key"
+                    and str(value) == idempotency_digest
+                    for name, value in headers.items()
+                ):
+                    return message_id
             if attempt < 2:
                 await asyncio.sleep(1)
         raise ProviderUnavailableError(

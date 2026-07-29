@@ -21,6 +21,8 @@ from email_agent.contracts import (
     MailProvider,
     ProviderAuthenticationError,
     ProviderPermissionError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
     SendEmailRequest,
 )
 from email_agent.providers.alimail import (
@@ -182,8 +184,11 @@ def test_mail_search_detail_attachments_contacts_and_download() -> None:
                 },
             )
         if path.endswith("/attachments/a1/$value"):
-            return httpx.Response(200, json={"location": "https://download.example/a1"})
-        if request.url.host == "download.example":
+            return httpx.Response(
+                302,
+                headers={"Location": "/download/a1"},
+            )
+        if path == "/download/a1":
             return httpx.Response(200, content=b"pdf")
         if path == "/v2/sharedContactFolders/$root/contacts":
             return httpx.Response(
@@ -218,10 +223,10 @@ def test_mail_search_detail_attachments_contacts_and_download() -> None:
 
 def test_mail_reply_send_and_mark_read_use_official_write_endpoints() -> None:
     writes: list[tuple[str, dict | None]] = []
-    generated_internet_message_id = ""
+    idempotency_digest = ""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal generated_internet_message_id
+        nonlocal idempotency_digest
         path = request.url.path
         if path == "/oauth2/v2.0/token":
             return httpx.Response(200, json={"access_token": "token"})
@@ -237,7 +242,9 @@ def test_mail_reply_send_and_mark_read_use_official_write_endpoints() -> None:
             )
         if path.endswith("/messages") and request.method == "POST":
             writes.append((path, _json(request)))
-            generated_internet_message_id = _json(request)["message"]["internetMessageId"]
+            idempotency_digest = _json(request)["message"]["internetMessageHeaders"][
+                "X-Email-Agent-Idempotency-Key"
+            ]
             return httpx.Response(200, json={"message": {"id": "draft-1"}})
         if path.endswith("/messages/draft-1/send"):
             writes.append((path, _json(request)))
@@ -249,10 +256,23 @@ def test_mail_reply_send_and_mark_read_use_official_write_endpoints() -> None:
                     "messages": [
                         _message(
                             "sent-1",
-                            internetMessageId=generated_internet_message_id,
+                            internetMessageId="<platform-generated@example.com>",
                         )
                     ],
                     "hasMore": False,
+                },
+            )
+        if path.endswith("/messages/sent-1"):
+            return httpx.Response(
+                200,
+                json={
+                    "message": _message(
+                        "sent-1",
+                        internetMessageId="<platform-generated@example.com>",
+                        internetMessageHeaders={
+                            "X-Email-Agent-Idempotency-Key": idempotency_digest
+                        },
+                    )
                 },
             )
         if path.endswith("/messages/batchUpdate"):
@@ -285,20 +305,49 @@ def test_mail_reply_send_and_mark_read_use_official_write_endpoints() -> None:
     assert writes[2][1]["action"] == "markRead"
 
 
-def test_client_maps_permission_error() -> None:
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    (
+        (403, ProviderPermissionError),
+        (429, ProviderRateLimitError),
+        (504, ProviderTimeoutError),
+    ),
+)
+def test_client_maps_provider_errors(status, expected_error) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/v2.0/token":
             return httpx.Response(200, json={"access_token": "token"})
-        return httpx.Response(403, json={"message": "forbidden"})
+        return httpx.Response(status, json={"message": "provider error"})
 
     client = _client(handler)
 
     async def run() -> None:
-        with pytest.raises(ProviderPermissionError):
+        with pytest.raises(expected_error):
             await client.request("GET", "/v2/test")
         await client.aclose()
 
     asyncio.run(run())
+
+
+def test_client_maps_network_timeout_after_read_retries() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/oauth2/v2.0/token":
+            return httpx.Response(200, json={"access_token": "token"})
+        attempts += 1
+        raise httpx.ReadTimeout("timeout", request=request)
+
+    client = _client(handler)
+
+    async def run() -> None:
+        with pytest.raises(ProviderTimeoutError):
+            await client.request("GET", "/v2/test")
+        await client.aclose()
+
+    asyncio.run(run())
+    assert attempts == 3
 
 
 def test_calendar_crud_consumes_approval_and_uses_selected_calendar() -> None:
