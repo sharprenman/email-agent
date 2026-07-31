@@ -15,7 +15,7 @@ from enum import StrEnum
 from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -32,6 +32,7 @@ from .contracts import (
     ProviderError,
     SendEmailRequest,
 )
+from .persistence import ApplicationState
 
 ONE_CLICK_VALUE = "List-Unsubscribe=One-Click"
 MAX_PDF_PAGES = 20
@@ -320,6 +321,81 @@ class JsonUnsubscribeStateStore:
                 temporary_path.unlink(missing_ok=True)
 
 
+class UnsubscribeStateStore(Protocol):
+    """退订幂等状态存储接口。"""
+
+    def get(self, user_id: str, target_hash: str) -> UnsubscribeRecord | None: ...
+
+    def begin(
+        self,
+        user_id: str,
+        candidate: UnsubscribeCandidate,
+        idempotency_key: str,
+    ) -> tuple[bool, UnsubscribeRecord]: ...
+
+    def finish(
+        self,
+        user_id: str,
+        candidate: UnsubscribeCandidate,
+        idempotency_key: str,
+        state: UnsubscribeState,
+        *,
+        evidence_hash: str | None = None,
+        status_code: int | None = None,
+    ) -> UnsubscribeRecord: ...
+
+
+class DatabaseUnsubscribeStateStore:
+    """将退订状态保存到应用 PostgreSQL 状态层。"""
+
+    def __init__(self, state: ApplicationState) -> None:
+        self._state = state
+
+    def get(self, user_id: str, target_hash: str) -> UnsubscribeRecord | None:
+        raw = self._state.get_unsubscribe(user_id, target_hash)
+        return UnsubscribeRecord.model_validate(raw) if raw is not None else None
+
+    def begin(
+        self,
+        user_id: str,
+        candidate: UnsubscribeCandidate,
+        idempotency_key: str,
+    ) -> tuple[bool, UnsubscribeRecord]:
+        record = _new_record(candidate, idempotency_key, UnsubscribeState.PENDING)
+        started, raw = self._state.begin_unsubscribe(
+            user_id,
+            candidate.fingerprint,
+            record.model_dump(mode="json"),
+        )
+        return started, UnsubscribeRecord.model_validate(raw)
+
+    def finish(
+        self,
+        user_id: str,
+        candidate: UnsubscribeCandidate,
+        idempotency_key: str,
+        state: UnsubscribeState,
+        *,
+        evidence_hash: str | None = None,
+        status_code: int | None = None,
+    ) -> UnsubscribeRecord:
+        record = _new_record(
+            candidate,
+            idempotency_key,
+            state,
+            evidence_hash=evidence_hash,
+            status_code=status_code,
+        )
+        if not self._state.finish_unsubscribe(
+            user_id,
+            candidate.fingerprint,
+            record.idempotency_hash,
+            record.model_dump(mode="json"),
+        ):
+            raise RuntimeError("退订状态与当前幂等请求不一致")
+        return record
+
+
 class UnsubscribeService:
     """审批后执行 one-click 或 mailto，并阻止重复副作用。"""
 
@@ -327,7 +403,7 @@ class UnsubscribeService:
         self,
         *,
         approvals: ApprovalService,
-        store: JsonUnsubscribeStateStore,
+        store: UnsubscribeStateStore,
         http_client: httpx.AsyncClient,
         mail_provider: MailProvider | None = None,
     ) -> None:

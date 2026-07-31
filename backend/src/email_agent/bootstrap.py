@@ -15,6 +15,7 @@ from .calendar import (
 from .config import MailProviderKind, Settings, build_default_auth_context
 from .content_tools import (
     AttachmentTextService,
+    DatabaseUnsubscribeStateStore,
     JsonUnsubscribeStateStore,
     UnsubscribeService,
 )
@@ -35,7 +36,6 @@ async def open_agent_service(
     if settings.mail_provider is None:
         raise RuntimeError("缺少 MAIL_PROVIDER，无法装配邮件智能体")
 
-    approvals = build_approval_service(settings)
     auth = build_default_auth_context(settings)
 
     async with AsyncExitStack() as stack:
@@ -45,6 +45,7 @@ async def open_agent_service(
             persistence = await stack.enter_async_context(
                 open_postgres_persistence(settings.database_url.get_secret_value())
             )
+        approvals = build_approval_service(settings, persistence.state)
 
         if settings.mail_provider is MailProviderKind.GMAIL:
             mail_provider = build_gmail_provider(settings)
@@ -65,7 +66,11 @@ async def open_agent_service(
         stack.push_async_callback(unsubscribe_client.aclose)
         unsubscribe_service = UnsubscribeService(
             approvals=approvals,
-            store=JsonUnsubscribeStateStore(settings.unsubscribe_state_path),
+            store=(
+                JsonUnsubscribeStateStore(settings.unsubscribe_state_path)
+                if settings.database_url is None
+                else DatabaseUnsubscribeStateStore(persistence.state)
+            ),
             http_client=unsubscribe_client,
             mail_provider=mail_provider,
         )

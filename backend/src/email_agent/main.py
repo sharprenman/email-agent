@@ -196,10 +196,14 @@ def create_app(
         responses={503: {"model": ErrorResponse}},
         tags=["健康检查"],
     )
-    def health_ready(request: Request) -> ApiResponse[ReadyData]:
+    async def health_ready(request: Request) -> ApiResponse[ReadyData]:
         """仅在 Agent 与持久化资源完成装配后返回就绪。"""
         service = application.state.agent_service
-        if service is None or not service.is_ready():
+        if service is None:
+            raise service_unavailable("Agent 运行时尚未装配")
+        check_ready = getattr(service, "check_ready", None)
+        ready = await check_ready() if check_ready is not None else service.is_ready()
+        if not ready:
             raise service_unavailable("Agent 运行时尚未装配")
         return ApiResponse(
             data=ReadyData(

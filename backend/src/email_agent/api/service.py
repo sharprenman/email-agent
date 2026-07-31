@@ -43,8 +43,6 @@ from .schemas import (
     ThreadStatus,
 )
 
-_THREAD_OWNER_NAMESPACE = ("email-agent", "api", "thread-owners")
-_IDEMPOTENCY_NAMESPACE_ROOT = ("email-agent", "api", "idempotency")
 _SENSITIVE_ARGUMENT_PARTS = ("token", "secret", "password", "credential")
 _EXTERNAL_APPROVAL_TOOLS = frozenset(
     {
@@ -67,6 +65,30 @@ class _WriteAudit:
     idempotency_hash: str | None
 
 
+class _ThreadLockContext:
+    """组合进程锁与数据库 advisory lock，不改写业务异常。"""
+
+    def __init__(self, service: AgentApplicationService, thread_id: str) -> None:
+        self._local = service._thread_locks.setdefault(thread_id, asyncio.Lock())
+        self._database = service._runtime.persistence.state.thread_lock(thread_id)
+
+    async def __aenter__(self) -> None:
+        await self._local.acquire()
+        try:
+            await asyncio.to_thread(self._database.__enter__)
+        except Exception:
+            self._local.release()
+            raise
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        del exc_type, exc, traceback
+        try:
+            await asyncio.to_thread(self._database.__exit__, None, None, None)
+        finally:
+            self._local.release()
+        return False
+
+
 class AgentApplicationService:
     """编排线程所有权、Agent 执行、审批恢复和持久化。"""
 
@@ -83,7 +105,6 @@ class AgentApplicationService:
         self._timeout_seconds = timeout_seconds
         self._observability = observability or Observability()
         self._thread_locks: dict[str, asyncio.Lock] = {}
-        self._idempotency_lock = asyncio.Lock()
 
     @property
     def user_id(self) -> str:
@@ -104,6 +125,16 @@ class AgentApplicationService:
                 self._runtime.persistence.store is not None,
             )
         )
+
+    async def check_ready(self) -> bool:
+        """确认运行时结构和数据库连接均可用。"""
+        if not self.is_ready():
+            return False
+        try:
+            await asyncio.to_thread(self._runtime.persistence.state.health_check)
+        except Exception:
+            return False
+        return True
 
     async def chat(
         self,
@@ -405,9 +436,9 @@ class AgentApplicationService:
             async with self._thread_lock(thread_id):
                 await self._runtime.persistence.checkpointer.adelete_thread(thread_id)
                 await asyncio.to_thread(
-                    self._runtime.persistence.store.delete,
-                    _THREAD_OWNER_NAMESPACE,
+                    self._runtime.persistence.state.delete_thread,
                     thread_id,
+                    self.user_id,
                 )
         self._thread_locks.pop(thread_id, None)
         return DeleteThreadData(thread_id=thread_id)
@@ -516,26 +547,20 @@ class AgentApplicationService:
             return requested_thread_id, False
         thread_id = f"th_{uuid.uuid4().hex}"
         await asyncio.to_thread(
-            self._runtime.persistence.store.put,
-            _THREAD_OWNER_NAMESPACE,
+            self._runtime.persistence.state.create_thread,
             thread_id,
-            {
-                "user_id": self.user_id,
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-            False,
+            self.user_id,
         )
         return thread_id, True
 
     async def _assert_thread_owner(self, thread_id: str) -> None:
-        item = await asyncio.to_thread(
-            self._runtime.persistence.store.get,
-            _THREAD_OWNER_NAMESPACE,
+        owner = await asyncio.to_thread(
+            self._runtime.persistence.state.get_thread_owner,
             thread_id,
         )
-        if item is None:
+        if owner is None:
             raise not_found("线程不存在")
-        if item.value.get("user_id") != self.user_id:
+        if owner != self.user_id:
             raise forbidden("无权访问该线程")
 
     async def _reserve_idempotency(
@@ -545,39 +570,30 @@ class AgentApplicationService:
         *,
         thread_id: str,
         fingerprint: str,
-    ) -> tuple[tuple[str, ...], str]:
-        namespace = (*_IDEMPOTENCY_NAMESPACE_ROOT, self.user_id)
-        storage_key = f"{operation}:{hashlib.sha256(key.encode()).hexdigest()}"
-        async with self._idempotency_lock:
-            existing = await asyncio.to_thread(
-                self._runtime.persistence.store.get,
-                namespace,
-                storage_key,
-            )
-            if existing is not None:
-                raise conflict("幂等键已经使用，不能重复执行")
-            await asyncio.to_thread(
-                self._runtime.persistence.store.put,
-                namespace,
-                storage_key,
-                {
-                    "thread_id": thread_id,
-                    "fingerprint": fingerprint,
-                    "created_at": datetime.now(UTC).isoformat(),
-                },
-                False,
-            )
-        return namespace, storage_key
+    ) -> tuple[str, str]:
+        key_hash = hashlib.sha256(key.encode()).hexdigest()
+        reserved = await asyncio.to_thread(
+            self._runtime.persistence.state.reserve_idempotency,
+            self.user_id,
+            operation,
+            key_hash,
+            thread_id,
+            fingerprint,
+        )
+        if not reserved:
+            raise conflict("幂等键已经使用，不能重复执行")
+        return operation, key_hash
 
     async def _release_idempotency(
         self,
-        reservation: tuple[tuple[str, ...], str],
+        reservation: tuple[str, str],
     ) -> None:
-        namespace, key = reservation
+        operation, key_hash = reservation
         await asyncio.to_thread(
-            self._runtime.persistence.store.delete,
-            namespace,
-            key,
+            self._runtime.persistence.state.release_idempotency,
+            self.user_id,
+            operation,
+            key_hash,
         )
 
     async def _cleanup_failed_new_thread(self, thread_id: str, is_new: bool) -> None:
@@ -585,13 +601,13 @@ class AgentApplicationService:
             return
         await self._runtime.persistence.checkpointer.adelete_thread(thread_id)
         await asyncio.to_thread(
-            self._runtime.persistence.store.delete,
-            _THREAD_OWNER_NAMESPACE,
+            self._runtime.persistence.state.delete_thread,
             thread_id,
+            self.user_id,
         )
 
-    def _thread_lock(self, thread_id: str) -> asyncio.Lock:
-        return self._thread_locks.setdefault(thread_id, asyncio.Lock())
+    def _thread_lock(self, thread_id: str) -> _ThreadLockContext:
+        return _ThreadLockContext(self, thread_id)
 
     def _context(
         self,

@@ -90,7 +90,11 @@ def build_email_agent_runtime(
     effective_definitions = definitions or load_agent_definitions()
     effective_skills = skill_bundle or load_skill_bundle()
     effective_persistence = persistence or build_in_memory_persistence()
-    memory_service = UserMemoryService(effective_persistence.store, auth)
+    memory_service = UserMemoryService(
+        effective_persistence.store,
+        auth,
+        effective_persistence.state,
+    )
     mail_writes = ApprovedMailService(mail_provider, approvals, auth)
     reader_tools = build_mailbox_tools(
         mail_provider,

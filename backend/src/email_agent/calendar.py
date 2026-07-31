@@ -39,6 +39,7 @@ from .contracts import (
     RecurrenceWeekday,
 )
 from .outlook import OutlookProvider, build_outlook_provider
+from .persistence import ApplicationState
 
 GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -96,12 +97,15 @@ class ApprovalService:
         signing_secret: str,
         *,
         clock: Callable[[], datetime] | None = None,
+        state: ApplicationState | None = None,
     ) -> None:
         if len(signing_secret.encode()) < 32:
             raise ValueError("审批签名密钥至少需要 32 字节")
         self._secret = signing_secret.encode()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._state = state
         self._consumed: dict[str, int] = {}
+        self._consumed_requests: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def mint_after_interrupt(
@@ -159,15 +163,27 @@ class ApprovalService:
         jti = str(claims.get("jti") or "")
         if not jti:
             raise ApprovalRequiredError("审批凭证缺少唯一标识")
+        request_hash = str(claims["request_hash"])
+        expires_at = int(claims["exp"])
+        if self._state is not None:
+            if not self._state.consume_approval(jti, user_id, request_hash, expires_at):
+                raise ApprovalConsumedError("审批凭证或操作幂等键已经使用，不能重复恢复")
+            return
         with self._lock:
             self._consumed = {
                 used_jti: expires_at
                 for used_jti, expires_at in self._consumed.items()
                 if expires_at >= now
             }
-            if jti in self._consumed:
-                raise ApprovalConsumedError("审批凭证已经使用，不能重复恢复")
-            self._consumed[jti] = int(claims["exp"])
+            self._consumed_requests = {
+                used_hash: expires_at
+                for used_hash, expires_at in self._consumed_requests.items()
+                if expires_at >= now
+            }
+            if jti in self._consumed or request_hash in self._consumed_requests:
+                raise ApprovalConsumedError("审批凭证或操作幂等键已经使用，不能重复恢复")
+            self._consumed[jti] = expires_at
+            self._consumed_requests[request_hash] = expires_at
 
     def _decode(self, token: str) -> Mapping[str, Any]:
         try:
@@ -191,11 +207,17 @@ class ApprovalService:
         return int(current.timestamp())
 
 
-def build_approval_service(settings: Settings) -> ApprovalService:
+def build_approval_service(
+    settings: Settings,
+    state: ApplicationState | None = None,
+) -> ApprovalService:
     """从配置创建审批服务，缺少签名密钥时默认拒绝启动写能力。"""
     if settings.approval_signing_secret is None:
         raise ApprovalRequiredError("缺少 APPROVAL_SIGNING_SECRET，外部写能力不可用")
-    return ApprovalService(settings.approval_signing_secret.get_secret_value())
+    return ApprovalService(
+        settings.approval_signing_secret.get_secret_value(),
+        state=state,
+    )
 
 
 class GoogleCalendarProvider:

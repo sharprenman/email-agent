@@ -3,6 +3,9 @@
 import os
 from pathlib import Path
 
+import pytest
+from dotenv import dotenv_values
+
 _CONFIG_ENVIRONMENT_VARIABLES = (
     "APP_ENV",
     "SINGLE_USER_ID",
@@ -48,3 +51,25 @@ def pytest_sessionstart() -> None:
 def pytest_sessionfinish() -> None:
     """测试会话结束后恢复调用方的工作目录。"""
     os.chdir(_ORIGINAL_WORKING_DIRECTORY)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """真实数据库测试必须由命令行显式指定配置文件。"""
+    parser.addoption(
+        "--postgres-env-file",
+        default=None,
+        help="显式启用 PostgreSQL 集成测试的 dotenv 文件",
+    )
+
+
+@pytest.fixture(scope="session")
+def postgres_test_url(request: pytest.FixtureRequest) -> str:
+    """只从显式指定的文件读取 DATABASE_URL，避免隐式污染测试。"""
+    env_file = request.config.getoption("--postgres-env-file")
+    if env_file is None:
+        pytest.skip("未显式启用 PostgreSQL 集成测试")
+    values = dotenv_values(Path(env_file).expanduser().resolve())
+    database_url = values.get("DATABASE_URL")
+    if not database_url:
+        pytest.fail("指定文件缺少 DATABASE_URL")
+    return database_url
