@@ -24,6 +24,7 @@ EMAIL_SKILLS = (
     "unsubscribe-discovery",
     "unsubscribe-execute",
     "writing-style-profile",
+    "crm-initialization",
 )
 _DIRECT_TOOLS = frozenset(
     {

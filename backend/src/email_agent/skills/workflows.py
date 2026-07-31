@@ -1,4 +1,4 @@
-"""为九类 Skill 生成确定性的查询、窗口和工具组合。"""
+"""为内置 Skill 生成确定性的查询、窗口和工具组合。"""
 
 from __future__ import annotations
 
@@ -94,6 +94,14 @@ SKILL_DELEGATED_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "writing-style-profile": frozenset({"get_sent_emails"}),
+        "crm-initialization": frozenset(
+            {
+                "initialize_crm",
+                "list_crm_contacts",
+                "get_crm_contact",
+                "update_crm_contact",
+            }
+        ),
     }
 )
 
@@ -108,6 +116,7 @@ _WINDOWS: Mapping[str, tuple[int | None, int | None, int]] = MappingProxyType(
         "unsubscribe-discovery": (30, 90, 100),
         "unsubscribe-execute": (30, 90, 100),
         "writing-style-profile": (None, None, 30),
+        "crm-initialization": (None, None, 200),
     }
 )
 
@@ -250,4 +259,6 @@ def _workflow_notes(skill_name: str) -> tuple[str, ...]:
         return ("目标必须唯一；每个候选分别审批并使用独立幂等键。",)
     if skill_name == "writing-style-profile":
         return ("画像保存前必须读取当前版本，并通过受审批的长期记忆工具写入。",)
+    if skill_name == "crm-initialization":
+        return ("初始化和画像更新必须等待人工审批；不得联网推断公司背景。",)
     return ()

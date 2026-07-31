@@ -14,6 +14,7 @@ from ..calendar import ApprovalService
 from ..config import AuthContext
 from ..content_tools import AttachmentTextService, UnsubscribeService
 from ..contracts import CalendarProvider, MailProvider
+from ..crm import CrmService
 from ..persistence import (
     MEMORY_PATHS,
     AgentPersistence,
@@ -25,6 +26,7 @@ from ..persistence import (
 from ..skills import SkillBundle, load_skill_bundle
 from .loader import (
     CALENDAR_AGENT,
+    CRM_AGENT,
     MAIL_WRITER,
     MAILBOX_READER,
     LoadedAgentDefinition,
@@ -35,6 +37,7 @@ from .results import AgentTaskResult
 from .tools import (
     ApprovedMailService,
     build_calendar_tools,
+    build_crm_tools,
     build_mail_writer_tools,
     build_mailbox_tools,
     build_supervisor_tools,
@@ -54,6 +57,7 @@ class EmailAgentRuntime:
     memory_service: UserMemoryService
     auth: AuthContext
     approvals: ApprovalService
+    crm: CrmService
 
     def subagent_tool_names(self, name: str) -> frozenset[str]:
         """返回指定自定义子代理的显式业务工具白名单。"""
@@ -86,7 +90,7 @@ def build_email_agent_runtime(
     skill_bundle: SkillBundle | None = None,
     persistence: AgentPersistence | None = None,
 ) -> EmailAgentRuntime:
-    """按受校验的外部定义装配 Supervisor 和三个最小权限子代理。"""
+    """按受校验的外部定义装配 Supervisor 和四个最小权限子代理。"""
     effective_definitions = definitions or load_agent_definitions()
     effective_skills = skill_bundle or load_skill_bundle()
     effective_persistence = persistence or build_in_memory_persistence()
@@ -95,7 +99,8 @@ def build_email_agent_runtime(
         auth,
         effective_persistence.state,
     )
-    mail_writes = ApprovedMailService(mail_provider, approvals, auth)
+    crm = CrmService(mail_provider, effective_persistence.state, auth)
+    mail_writes = ApprovedMailService(mail_provider, approvals, auth, crm)
     reader_tools = build_mailbox_tools(
         mail_provider,
         attachment_service,
@@ -103,6 +108,7 @@ def build_email_agent_runtime(
     )
     writer_tools = build_mail_writer_tools(mail_writes, unsubscribe_service, auth)
     calendar_tools = build_calendar_tools(calendar_provider, auth)
+    crm_tools = build_crm_tools(crm)
     supervisor_tools = build_supervisor_tools(
         memory_service,
         user_timezone=user_timezone,
@@ -111,6 +117,7 @@ def build_email_agent_runtime(
         MAILBOX_READER: _tool_registry(reader_tools),
         MAIL_WRITER: _tool_registry(writer_tools),
         CALENDAR_AGENT: _tool_registry(calendar_tools),
+        CRM_AGENT: _tool_registry(crm_tools),
     }
     subagents = tuple(
         _build_subagent(definition, registries[definition.name])
@@ -174,6 +181,7 @@ def build_email_agent_runtime(
         memory_service=memory_service,
         auth=auth,
         approvals=approvals,
+        crm=crm,
     )
 
 

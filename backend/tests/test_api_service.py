@@ -18,6 +18,8 @@ from email_agent.api.schemas import (
 from email_agent.api.service import AgentApplicationService
 from email_agent.calendar import ApprovalService
 from email_agent.config import AuthContext
+from email_agent.content_tools import AttachmentTextService
+from email_agent.files import UploadedFileService
 from email_agent.observability import MemoryAuditSink, Observability, hash_reference
 from email_agent.persistence import build_in_memory_persistence
 
@@ -27,9 +29,11 @@ class _FakeAgent:
         self._states: dict[str, StateSnapshot] = {}
         self.interrupt_tool = interrupt_tool
         self.last_command: Command | None = None
+        self.last_payload = None
 
     async def ainvoke(self, payload, config, *, context):
         del context
+        self.last_payload = payload
         thread_id = config["configurable"]["thread_id"]
         if isinstance(payload, Command):
             self.last_command = payload
@@ -197,6 +201,43 @@ def test_chat_creates_owned_thread_and_delete_removes_access() -> None:
     with pytest.raises(ApiError) as exc_info:
         asyncio.run(service.get_thread(result.thread_id))
     assert exc_info.value.status_code == 404
+
+
+def test_chat_resolves_controlled_attachment_without_exposing_path() -> None:
+    persistence = build_in_memory_persistence()
+    files = UploadedFileService(
+        persistence.state,
+        AuthContext(user_id="owner"),
+        AttachmentTextService(max_attachment_bytes=1024),
+        max_bytes=1024,
+    )
+    uploaded = asyncio.run(
+        files.upload("../../private.txt", "text/plain", b"attachment facts")
+    )
+    agent = _FakeAgent()
+    service = AgentApplicationService(
+        _FakeRuntime(agent, persistence=persistence),
+        uploaded_files=files,
+    )
+
+    asyncio.run(
+        service.chat(
+            _chat_request(
+                attachments=(
+                    {
+                        "file_id": uploaded.file_id,
+                        "display_name": "../../ignored.txt",
+                    },
+                )
+            )
+        )
+    )
+
+    content = agent.last_payload["messages"][0].content
+    assert "attachment facts" in content
+    assert "不可信数据" in content
+    assert "../" not in content
+    assert "ignored.txt" not in content
 
 
 def test_unknown_and_foreign_threads_are_distinguished() -> None:

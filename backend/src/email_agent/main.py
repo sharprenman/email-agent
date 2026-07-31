@@ -44,11 +44,13 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         app,
         *,
         max_request_bytes: int,
+        max_attachment_bytes: int,
         observability: Observability,
         user_id: str,
     ) -> None:
         super().__init__(app)
         self._max_request_bytes = max_request_bytes
+        self._max_attachment_bytes = max_attachment_bytes
         self._observability = observability
         self._user_id = user_id
 
@@ -66,10 +68,15 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         )
         started = time.perf_counter()
         content_length = request.headers.get("Content-Length")
+        request_limit = (
+            self._max_attachment_bytes
+            if request.method == "POST" and request.url.path == "/api/v1/files"
+            else self._max_request_bytes
+        )
         if content_length is not None:
             try:
                 parsed_length = int(content_length)
-                too_large = parsed_length < 0 or parsed_length > self._max_request_bytes
+                too_large = parsed_length < 0 or parsed_length > request_limit
             except ValueError:
                 too_large = True
             if too_large:
@@ -175,6 +182,7 @@ def create_app(
     application.add_middleware(
         RequestContextMiddleware,
         max_request_bytes=effective_settings.max_request_bytes,
+        max_attachment_bytes=effective_settings.max_attachment_bytes,
         observability=effective_observability,
         user_id=effective_settings.single_user_id,
     )

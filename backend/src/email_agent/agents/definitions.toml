@@ -51,3 +51,18 @@ interrupt_on = [
   "update_calendar_event",
   "delete_calendar_event",
 ]
+
+[[subagents]]
+name = "crm-agent"
+description = "从邮箱事实构建用户隔离的联系人画像、待回复清单，并维护跟进字段。"
+prompt = "prompts/crm_agent.md"
+tools = [
+  "initialize_crm",
+  "list_crm_contacts",
+  "get_crm_contact",
+  "update_crm_contact",
+]
+interrupt_on = [
+  "initialize_crm",
+  "update_crm_contact",
+]

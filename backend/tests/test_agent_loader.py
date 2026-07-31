@@ -10,7 +10,7 @@ from email_agent.agents import AgentDefinitionError, load_agent_definitions
 def _write_definition(root: Path, manifest: str) -> None:
     prompts = root / "prompts"
     prompts.mkdir()
-    for name in ("supervisor", "mailbox_reader", "mail_writer", "calendar_agent"):
+    for name in ("supervisor", "mailbox_reader", "mail_writer", "calendar_agent", "crm_agent"):
         (prompts / f"{name}.md").write_text(f"{name} 的中文提示词", encoding="utf-8")
     (root / "definitions.toml").write_text(manifest, encoding="utf-8")
 
@@ -69,6 +69,12 @@ interrupt_on = [
   "update_calendar_event",
   "delete_calendar_event",
 ]
+
+[[subagents]]
+name = "crm-agent"
+description = "CRM"
+prompt = "prompts/crm_agent.md"
+tools = ["list_crm_contacts"]
 {duplicate}
 """
 
@@ -82,6 +88,7 @@ def test_default_definitions_load_prompts_from_package_resources() -> None:
         "mailbox-reader",
         "mail-writer",
         "calendar-agent",
+        "crm-agent",
     ]
     assert "只读邮箱子代理" in definitions.subagent("mailbox-reader").system_prompt
 
@@ -117,6 +124,7 @@ def test_default_prompts_require_real_delegation_and_business_tools() -> None:
         "calendar-agent"
     ).system_prompt
     assert '"count": N' in definitions.subagent("calendar-agent").system_prompt
+    assert "initialize_crm" in definitions.subagent("crm-agent").system_prompt
 
 
 def test_definition_cannot_grant_writer_tool_to_reader(tmp_path: Path) -> None:

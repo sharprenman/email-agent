@@ -139,6 +139,67 @@ class AttachmentTextService:
             truncated=truncated,
         )
 
+    async def extract_bytes(
+        self,
+        *,
+        file_id: str,
+        filename: str,
+        content_type: str,
+        content: bytes,
+    ) -> AttachmentTextResult:
+        """从已受请求大小限制的上传内容提取文本。"""
+        safe_name = _safe_filename(filename)
+        suffix = Path(safe_name).suffix.casefold()
+        attachment = Attachment(
+            id=file_id,
+            email_id="uploaded",
+            filename=safe_name,
+            content_type=content_type,
+            size_bytes=len(content),
+        )
+        if not _is_supported_attachment(suffix, content_type):
+            return _attachment_result(
+                attachment,
+                safe_name,
+                AttachmentTextStatus.SKIPPED,
+                "附件类型不受支持或 MIME 与扩展名不一致",
+            )
+        if len(content) > self._max_bytes:
+            return _attachment_result(
+                attachment,
+                safe_name,
+                AttachmentTextStatus.SKIPPED,
+                "附件超过大小限制",
+            )
+        try:
+            text = await asyncio.wait_for(
+                asyncio.to_thread(self._extractor, suffix, content),
+                timeout=self._timeout,
+            )
+        except TimeoutError:
+            return _attachment_result(
+                attachment,
+                safe_name,
+                AttachmentTextStatus.FAILED,
+                "附件解析超时",
+            )
+        except (PyPdfError, ValueError, OSError, zipfile.BadZipFile):
+            return _attachment_result(
+                attachment,
+                safe_name,
+                AttachmentTextStatus.FAILED,
+                "附件解析失败",
+            )
+        normalized = text.replace("\x00", "").strip()
+        truncated = len(normalized) > self._max_chars
+        return AttachmentTextResult(
+            attachment_id=file_id,
+            filename=safe_name,
+            status=AttachmentTextStatus.EXTRACTED,
+            text=normalized[: self._max_chars],
+            truncated=truncated,
+        )
+
 
 class UnsubscribeMethod(StrEnum):
     """退订候选的执行方式。"""

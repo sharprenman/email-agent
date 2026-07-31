@@ -7,24 +7,26 @@ import json
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Path, Request, Security
+from fastapi import APIRouter, Path, Query, Request, Security
 from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 
 from ..config import AuthContext, Settings
 from ..observability import ObservationContext
-from .errors import service_unavailable, translate_exception, unauthorized
+from .errors import bad_request, service_unavailable, translate_exception, unauthorized
 from .schemas import (
     THREAD_ID_PATTERN,
     ApiResponse,
     ChatData,
     ChatRequest,
+    DeleteFileData,
     DeleteThreadData,
     ErrorResponse,
     ResumeRequest,
     StreamEvent,
     StreamEventType,
     ThreadData,
+    UploadedFileData,
 )
 from .service import AgentApplicationService
 
@@ -39,6 +41,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 api_router = APIRouter(prefix="/api/v1", tags=["邮件 Agent"])
+FILE_ID_PATTERN = r"^file_[A-Za-z0-9_-]{24,64}$"
 
 
 def get_agent_service(request: Request) -> AgentApplicationService:
@@ -84,6 +87,55 @@ async def chat(
         observation=_observation(request, auth),
     )
     return _success(request, data)
+
+
+@api_router.post(
+    "/files",
+    response_model=ApiResponse[UploadedFileData],
+    responses=_ERROR_RESPONSES,
+    summary="上传受控聊天附件",
+)
+async def upload_file(
+    request: Request,
+    filename: Annotated[str, Query(min_length=1, max_length=255)],
+    auth: Annotated[AuthContext, Security(require_auth)],
+) -> ApiResponse[UploadedFileData]:
+    del auth
+    content_type = request.headers.get("Content-Type", "")
+    if not content_type or len(content_type) > 255:
+        raise bad_request("上传文件缺少有效 Content-Type")
+    limit = request.app.state.settings.max_attachment_bytes
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise bad_request("上传文件超过大小限制")
+        chunks.append(chunk)
+    data = await get_agent_service(request).upload_file(
+        filename=filename,
+        content_type=content_type,
+        content=b"".join(chunks),
+    )
+    return _success(request, data)
+
+
+@api_router.delete(
+    "/files/{file_id}",
+    response_model=ApiResponse[DeleteFileData],
+    responses=_ERROR_RESPONSES,
+    summary="删除受控聊天附件",
+)
+async def delete_file(
+    file_id: Annotated[
+        str,
+        Path(min_length=29, max_length=69, pattern=FILE_ID_PATTERN),
+    ],
+    request: Request,
+    auth: Annotated[AuthContext, Security(require_auth)],
+) -> ApiResponse[DeleteFileData]:
+    del auth
+    return _success(request, await get_agent_service(request).delete_file(file_id))
 
 
 @api_router.post(

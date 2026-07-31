@@ -13,6 +13,7 @@ from ..persistence import (
 from ..skills import SkillBundle, SkillCatalogError, load_skill_bundle
 from .loader import (
     CALENDAR_AGENT,
+    CRM_AGENT,
     MAIL_WRITER,
     MAILBOX_READER,
     AgentDefinitionError,
@@ -29,6 +30,7 @@ from .tools import ApprovedMailService, mail_approval_payload
 
 __all__ = [
     "CALENDAR_AGENT",
+    "CRM_AGENT",
     "MAILBOX_READER",
     "MAIL_WRITER",
     "AgentDefinitionError",

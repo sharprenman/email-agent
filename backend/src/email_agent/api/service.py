@@ -19,6 +19,7 @@ from ..agents import AgentTaskResult, AgentTaskStatus, EmailAgentRuntime, mail_a
 from ..calendar import ApprovalAction
 from ..content_tools import UnsubscribeCandidate, UnsubscribeMethod
 from ..contracts import CalendarEventInput, SendEmailRequest
+from ..files import UploadedFileError, UploadedFileService
 from ..observability import Observability, ObservationContext, hash_reference
 from .errors import (
     bad_request,
@@ -33,6 +34,7 @@ from .schemas import (
     ApprovalDecisionType,
     ChatData,
     ChatRequest,
+    DeleteFileData,
     DeleteThreadData,
     PendingAction,
     PendingApproval,
@@ -41,6 +43,7 @@ from .schemas import (
     StreamEventType,
     ThreadData,
     ThreadStatus,
+    UploadedFileData,
 )
 
 _SENSITIVE_ARGUMENT_PARTS = ("token", "secret", "password", "credential")
@@ -54,7 +57,10 @@ _EXTERNAL_APPROVAL_TOOLS = frozenset(
     }
 )
 _MEMORY_APPROVAL_TOOL = "save_user_memory"
-_WRITE_APPROVAL_TOOLS = _EXTERNAL_APPROVAL_TOOLS | {_MEMORY_APPROVAL_TOOL}
+_INTERNAL_APPROVAL_TOOLS = frozenset(
+    {_MEMORY_APPROVAL_TOOL, "initialize_crm", "update_crm_contact"}
+)
+_WRITE_APPROVAL_TOOLS = _EXTERNAL_APPROVAL_TOOLS | _INTERNAL_APPROVAL_TOOLS
 
 
 @dataclass(frozen=True)
@@ -98,12 +104,14 @@ class AgentApplicationService:
         *,
         timeout_seconds: float = 120,
         observability: Observability | None = None,
+        uploaded_files: UploadedFileService | None = None,
     ) -> None:
         if not 1 <= timeout_seconds <= 600:
             raise ValueError("Agent 超时必须在 1 到 600 秒之间")
         self._runtime = runtime
         self._timeout_seconds = timeout_seconds
         self._observability = observability or Observability()
+        self._uploaded_files = uploaded_files
         self._thread_locks: dict[str, asyncio.Lock] = {}
 
     @property
@@ -143,7 +151,7 @@ class AgentApplicationService:
         observation: ObservationContext | None = None,
     ) -> ChatData:
         """执行一次同步 Agent 对话，并返回完成或待审批状态。"""
-        self._ensure_attachments_available(request)
+        message = await self._build_human_message(request)
         thread_id, is_new = await self._prepare_thread(request.thread_id)
         context = self._context(observation, thread_id)
         reservation = await self._reserve_idempotency(
@@ -166,7 +174,7 @@ class AgentApplicationService:
                                 {
                                     "messages": [
                                         HumanMessage(
-                                            content=request.message,
+                                            content=message,
                                             additional_kwargs={
                                                 "request_idempotency_key": (
                                                     request.idempotency_key
@@ -206,7 +214,7 @@ class AgentApplicationService:
         observation: ObservationContext | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """以稳定且脱敏的事件结构流式执行 Agent。"""
-        self._ensure_attachments_available(request)
+        message = await self._build_human_message(request)
         thread_id, is_new = await self._prepare_thread(request.thread_id)
         context = self._context(observation, thread_id)
         reservation = await self._reserve_idempotency(
@@ -236,7 +244,7 @@ class AgentApplicationService:
                                 {
                                     "messages": [
                                         HumanMessage(
-                                            content=request.message,
+                                            content=message,
                                             additional_kwargs={
                                                 "request_idempotency_key": (
                                                     request.idempotency_key
@@ -443,6 +451,35 @@ class AgentApplicationService:
         self._thread_locks.pop(thread_id, None)
         return DeleteThreadData(thread_id=thread_id)
 
+    async def upload_file(
+        self,
+        *,
+        filename: str,
+        content_type: str,
+        content: bytes,
+    ) -> UploadedFileData:
+        if self._uploaded_files is None:
+            raise service_unavailable("受控文件服务尚未装配")
+        try:
+            record = await self._uploaded_files.upload(filename, content_type, content)
+        except UploadedFileError as exc:
+            raise bad_request(str(exc)) from exc
+        return UploadedFileData(
+            file_id=record.file_id,
+            filename=record.filename,
+            content_type=record.content_type,
+            size_bytes=record.size_bytes,
+            truncated=record.truncated,
+            expires_at=record.expires_at,
+        )
+
+    async def delete_file(self, file_id: str) -> DeleteFileData:
+        if self._uploaded_files is None:
+            raise service_unavailable("受控文件服务尚未装配")
+        if not await self._uploaded_files.delete(file_id):
+            raise not_found("上传文件不存在、已过期或无权访问")
+        return DeleteFileData(file_id=file_id)
+
     def _build_resume_decisions(
         self,
         interrupt: Interrupt,
@@ -525,7 +562,7 @@ class AgentApplicationService:
         idempotency_key: str,
     ) -> dict[str, Any]:
         arguments.pop("approval_token", None)
-        if tool_name == _MEMORY_APPROVAL_TOOL:
+        if tool_name in _INTERNAL_APPROVAL_TOOLS:
             return arguments
         if tool_name not in _EXTERNAL_APPROVAL_TOOLS:
             raise ValueError("不支持的审批工具")
@@ -686,10 +723,18 @@ class AgentApplicationService:
                     outcome=outcome,
                 )
 
-    @staticmethod
-    def _ensure_attachments_available(request: ChatRequest) -> None:
-        if request.attachments:
-            raise service_unavailable("附件解析服务尚未装配")
+    async def _build_human_message(self, request: ChatRequest) -> str:
+        if not request.attachments:
+            return request.message
+        if self._uploaded_files is None:
+            raise service_unavailable("受控文件服务尚未装配")
+        try:
+            context = await self._uploaded_files.build_context(
+                tuple(item.file_id for item in request.attachments)
+            )
+        except UploadedFileError as exc:
+            raise not_found(str(exc)) from exc
+        return request.message + context
 
 
 def _thread_config(thread_id: str) -> dict[str, Any]:

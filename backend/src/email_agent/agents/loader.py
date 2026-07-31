@@ -13,8 +13,9 @@ from typing import Any
 MAILBOX_READER = "mailbox-reader"
 MAIL_WRITER = "mail-writer"
 CALENDAR_AGENT = "calendar-agent"
+CRM_AGENT = "crm-agent"
 
-_EXPECTED_SUBAGENTS = frozenset({MAILBOX_READER, MAIL_WRITER, CALENDAR_AGENT})
+_EXPECTED_SUBAGENTS = frozenset({MAILBOX_READER, MAIL_WRITER, CALENDAR_AGENT, CRM_AGENT})
 _MAXIMUM_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "email-supervisor": frozenset(
@@ -49,6 +50,14 @@ _MAXIMUM_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "delete_calendar_event",
             }
         ),
+        CRM_AGENT: frozenset(
+            {
+                "initialize_crm",
+                "list_crm_contacts",
+                "get_crm_contact",
+                "update_crm_contact",
+            }
+        ),
     }
 )
 _SIDE_EFFECT_TOOLS = frozenset(
@@ -59,6 +68,8 @@ _SIDE_EFFECT_TOOLS = frozenset(
         "update_calendar_event",
         "delete_calendar_event",
         "save_user_memory",
+        "initialize_crm",
+        "update_crm_contact",
     }
 )
 
@@ -81,7 +92,7 @@ class LoadedAgentDefinition:
 
 @dataclass(frozen=True)
 class LoadedAgentDefinitions:
-    """监督代理及固定三个子代理的完整定义。"""
+    """监督代理及固定四个子代理的完整定义。"""
 
     supervisor: LoadedAgentDefinition
     subagents: tuple[LoadedAgentDefinition, ...]
@@ -116,7 +127,7 @@ def load_agent_definitions(root: Path | Any | None = None) -> LoadedAgentDefinit
         raise AgentDefinitionError("子代理名称不能重复")
     if set(names) != _EXPECTED_SUBAGENTS:
         raise AgentDefinitionError(
-            "子代理必须且只能包含 mailbox-reader、mail-writer、calendar-agent"
+            "子代理必须且只能包含 mailbox-reader、mail-writer、calendar-agent、crm-agent"
         )
     return LoadedAgentDefinitions(supervisor=supervisor, subagents=subagents)
 

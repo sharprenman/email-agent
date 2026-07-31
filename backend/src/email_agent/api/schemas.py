@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Generic, Literal, TypeVar
 
@@ -167,6 +168,22 @@ class DeleteThreadData(ApiModel):
     """线程删除结果。"""
 
     thread_id: str
+    deleted: Literal[True] = True
+
+
+class UploadedFileData(ApiModel):
+    """上传后可由聊天请求引用的文件元数据。"""
+
+    file_id: str = Field(pattern=r"^file_[A-Za-z0-9_-]{24,64}$")
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(ge=1)
+    truncated: bool
+    expires_at: datetime
+
+
+class DeleteFileData(ApiModel):
+    file_id: str = Field(pattern=r"^file_[A-Za-z0-9_-]{24,64}$")
     deleted: Literal[True] = True
 
 

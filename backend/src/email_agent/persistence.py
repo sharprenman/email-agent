@@ -150,6 +150,29 @@ class ApplicationState(Protocol):
         expected_version: int,
     ) -> bool: ...
 
+    def put_crm_contact(
+        self,
+        user_id: str,
+        email: str,
+        record: Mapping[str, Any],
+    ) -> None: ...
+
+    def get_crm_contact(self, user_id: str, email: str) -> Mapping[str, Any] | None: ...
+
+    def list_crm_contacts(self, user_id: str, limit: int) -> tuple[Mapping[str, Any], ...]: ...
+
+    def put_uploaded_file(
+        self,
+        user_id: str,
+        file_id: str,
+        record: Mapping[str, Any],
+        content: bytes,
+    ) -> None: ...
+
+    def get_uploaded_file(self, user_id: str, file_id: str) -> Mapping[str, Any] | None: ...
+
+    def delete_uploaded_file(self, user_id: str, file_id: str) -> bool: ...
+
 
 class StoreApplicationState:
     """供测试和无数据库开发使用的进程内状态实现。"""
@@ -158,6 +181,8 @@ class StoreApplicationState:
     _IDEMPOTENCY = ("email-agent", "application", "idempotency")
     _APPROVALS = ("email-agent", "application", "approvals")
     _UNSUBSCRIBE = ("email-agent", "application", "unsubscribe")
+    _CRM = ("email-agent", "application", "crm")
+    _FILES = ("email-agent", "application", "uploaded-files")
 
     def __init__(self, store: BaseStore) -> None:
         self._store = store
@@ -286,6 +311,49 @@ class StoreApplicationState:
             self._store.put(namespace, key, dict(value), index=False)
             return True
 
+    def put_crm_contact(
+        self,
+        user_id: str,
+        email: str,
+        record: Mapping[str, Any],
+    ) -> None:
+        self._store.put((*self._CRM, user_id), email, dict(record), index=False)
+
+    def get_crm_contact(self, user_id: str, email: str) -> Mapping[str, Any] | None:
+        item = self._store.get((*self._CRM, user_id), email)
+        return item.value if item is not None else None
+
+    def list_crm_contacts(self, user_id: str, limit: int) -> tuple[Mapping[str, Any], ...]:
+        items = self._store.search((*self._CRM, user_id), limit=limit)
+        return tuple(item.value for item in items)
+
+    def put_uploaded_file(
+        self,
+        user_id: str,
+        file_id: str,
+        record: Mapping[str, Any],
+        content: bytes,
+    ) -> None:
+        del content
+        self._store.put(self._FILES, f"{user_id}:{file_id}", dict(record), index=False)
+
+    def get_uploaded_file(self, user_id: str, file_id: str) -> Mapping[str, Any] | None:
+        item = self._store.get(self._FILES, f"{user_id}:{file_id}")
+        if item is None:
+            return None
+        expires_at = datetime.fromisoformat(str(item.value["expires_at"]))
+        if expires_at <= datetime.now(UTC):
+            self._store.delete(self._FILES, f"{user_id}:{file_id}")
+            return None
+        return item.value
+
+    def delete_uploaded_file(self, user_id: str, file_id: str) -> bool:
+        key = f"{user_id}:{file_id}"
+        if self._store.get(self._FILES, key) is None:
+            return False
+        self._store.delete(self._FILES, key)
+        return True
+
 
 class PostgresApplicationState:
     """使用数据库约束和条件更新实现跨进程原子状态。"""
@@ -331,6 +399,29 @@ class PostgresApplicationState:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (user_id, target_hash)
             )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS email_agent_crm_contacts (
+                user_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                record JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, email)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS email_agent_uploaded_files (
+                file_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                record JSONB NOT NULL,
+                content BYTEA NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS email_agent_uploaded_files_user_expiry_idx
+            ON email_agent_uploaded_files (user_id, expires_at)
             """,
         )
         with self._pool.connection() as conn:
@@ -548,6 +639,117 @@ class PostgresApplicationState:
                         """,
                         (payload, prefix, key, expected_version),
                     )
+                return cur.rowcount == 1
+
+    def put_crm_contact(
+        self,
+        user_id: str,
+        email: str,
+        record: Mapping[str, Any],
+    ) -> None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO email_agent_crm_contacts (user_id, email, record)
+                    VALUES (%s, %s, %s::jsonb)
+                    ON CONFLICT (user_id, email) DO UPDATE
+                    SET record = EXCLUDED.record, updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (user_id, email, json.dumps(dict(record), ensure_ascii=False)),
+                )
+
+    def get_crm_contact(self, user_id: str, email: str) -> Mapping[str, Any] | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT record FROM email_agent_crm_contacts
+                    WHERE user_id = %s AND email = %s
+                    """,
+                    (user_id, email),
+                )
+                row = cur.fetchone()
+                return row[0] if row is not None else None
+
+    def list_crm_contacts(self, user_id: str, limit: int) -> tuple[Mapping[str, Any], ...]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT record FROM email_agent_crm_contacts
+                    WHERE user_id = %s
+                    ORDER BY
+                        CASE record->>'priority'
+                            WHEN 'high' THEN 0
+                            WHEN 'medium' THEN 1
+                            ELSE 2
+                        END,
+                        COALESCE((record->>'frequency')::integer, 0) DESC,
+                        email
+                    LIMIT %s
+                    """,
+                    (user_id, limit),
+                )
+                return tuple(row[0] for row in cur.fetchall())
+
+    def put_uploaded_file(
+        self,
+        user_id: str,
+        file_id: str,
+        record: Mapping[str, Any],
+        content: bytes,
+    ) -> None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM email_agent_uploaded_files WHERE expires_at <= CURRENT_TIMESTAMP"
+                )
+                cur.execute(
+                    """
+                    INSERT INTO email_agent_uploaded_files
+                        (file_id, user_id, record, content, expires_at)
+                    VALUES (%s, %s, %s::jsonb, %s, %s)
+                    """,
+                    (
+                        file_id,
+                        user_id,
+                        json.dumps(dict(record), ensure_ascii=False),
+                        content,
+                        datetime.fromisoformat(str(record["expires_at"])),
+                    ),
+                )
+
+    def get_uploaded_file(self, user_id: str, file_id: str) -> Mapping[str, Any] | None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM email_agent_uploaded_files
+                    WHERE file_id = %s AND expires_at <= CURRENT_TIMESTAMP
+                    """,
+                    (file_id,),
+                )
+                cur.execute(
+                    """
+                    SELECT record FROM email_agent_uploaded_files
+                    WHERE user_id = %s AND file_id = %s
+                    """,
+                    (user_id, file_id),
+                )
+                row = cur.fetchone()
+                return row[0] if row is not None else None
+
+    def delete_uploaded_file(self, user_id: str, file_id: str) -> bool:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM email_agent_uploaded_files
+                    WHERE user_id = %s AND file_id = %s
+                    """,
+                    (user_id, file_id),
+                )
                 return cur.rowcount == 1
 
 

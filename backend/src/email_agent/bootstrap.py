@@ -19,6 +19,7 @@ from .content_tools import (
     JsonUnsubscribeStateStore,
     UnsubscribeService,
 )
+from .files import UploadedFileService
 from .gmail import build_gmail_provider
 from .model import build_model
 from .observability import Observability
@@ -74,12 +75,13 @@ async def open_agent_service(
             http_client=unsubscribe_client,
             mail_provider=mail_provider,
         )
+        attachment_service = AttachmentTextService(
+            max_attachment_bytes=settings.max_attachment_bytes,
+        )
         runtime = build_email_agent_runtime(
             mail_provider=mail_provider,
             calendar_provider=calendar_provider,
-            attachment_service=AttachmentTextService(
-                max_attachment_bytes=settings.max_attachment_bytes,
-            ),
+            attachment_service=attachment_service,
             approvals=approvals,
             auth=auth,
             unsubscribe_service=unsubscribe_service,
@@ -91,4 +93,10 @@ async def open_agent_service(
             runtime,
             timeout_seconds=settings.agent_timeout_seconds,
             observability=observability,
+            uploaded_files=UploadedFileService(
+                persistence.state,
+                auth,
+                attachment_service,
+                max_bytes=settings.max_attachment_bytes,
+            ),
         )

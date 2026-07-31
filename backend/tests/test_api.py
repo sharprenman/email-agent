@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -10,11 +11,13 @@ import pytest
 from email_agent.api.errors import conflict, forbidden, not_found
 from email_agent.api.schemas import (
     ChatData,
+    DeleteFileData,
     DeleteThreadData,
     StreamEvent,
     StreamEventType,
     ThreadData,
     ThreadStatus,
+    UploadedFileData,
 )
 from email_agent.config import AppEnvironment, Settings
 from email_agent.contracts import (
@@ -35,6 +38,7 @@ VALID_CHAT = {
 class _FakeService:
     error: Exception | None = None
     user_id: str = "private-owner"
+    uploaded_content: bytes | None = None
 
     def is_ready(self) -> bool:
         return True
@@ -85,6 +89,20 @@ class _FakeService:
         self._raise()
         return DeleteThreadData(thread_id=thread_id)
 
+    async def upload_file(self, *, filename, content_type, content) -> UploadedFileData:
+        self.uploaded_content = content
+        return UploadedFileData(
+            file_id="file_abcdefghijklmnopqrstuvwxyz123456",
+            filename=filename,
+            content_type=content_type,
+            size_bytes=len(content),
+            truncated=False,
+            expires_at=datetime.now(UTC) + timedelta(hours=24),
+        )
+
+    async def delete_file(self, file_id: str) -> DeleteFileData:
+        return DeleteFileData(file_id=file_id)
+
     def _raise(self) -> None:
         if self.error is not None:
             raise self.error
@@ -106,6 +124,7 @@ async def _request(
     path: str,
     *,
     json: Any = None,
+    content: bytes | None = None,
     headers: dict[str, str] | None = None,
     settings: Settings | None = None,
 ) -> httpx.Response:
@@ -116,6 +135,7 @@ async def _request(
             method,
             path,
             json=json,
+            content=content,
             headers=headers,
         )
 
@@ -287,6 +307,33 @@ def test_ready_and_thread_routes_use_unified_contract() -> None:
     assert ready.json()["data"]["status"] == "ready"
     assert thread.status_code == 200
     assert deleted.json()["data"] == {"thread_id": THREAD_ID, "deleted": True}
+
+
+def test_file_upload_and_delete_use_controlled_id_contract() -> None:
+    service = _FakeService()
+    uploaded = asyncio.run(
+        _request(
+            service,
+            "POST",
+            "/api/v1/files?filename=notes.txt",
+            content=b"safe text",
+            headers={**_auth(), "Content-Type": "text/plain"},
+        )
+    )
+    file_id = uploaded.json()["data"]["file_id"]
+    deleted = asyncio.run(
+        _request(
+            service,
+            "DELETE",
+            f"/api/v1/files/{file_id}",
+            headers=_auth(),
+        )
+    )
+
+    assert uploaded.status_code == 200
+    assert service.uploaded_content == b"safe text"
+    assert file_id.startswith("file_")
+    assert deleted.json()["data"] == {"file_id": file_id, "deleted": True}
 
 
 def test_resume_route_validates_decisions_and_returns_thread() -> None:

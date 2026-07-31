@@ -1,5 +1,6 @@
 """邮件草稿、审批发信和审批退订 Tool。"""
 
+import logging
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -8,6 +9,9 @@ from ...calendar import ApprovalAction, ApprovalService
 from ...config import AuthContext
 from ...content_tools import UnsubscribeCandidate, UnsubscribeService
 from ...contracts import MailProvider, SendEmailRequest
+from ...crm import CrmService
+
+logger = logging.getLogger(__name__)
 
 
 def mail_approval_payload(request: SendEmailRequest) -> dict[str, Any]:
@@ -23,10 +27,12 @@ class ApprovedMailService:
         provider: MailProvider,
         approvals: ApprovalService,
         auth: AuthContext,
+        crm: CrmService | None = None,
     ) -> None:
         self._provider = provider
         self._approvals = approvals
         self._auth = auth
+        self._crm = crm
 
     async def send(
         self,
@@ -44,10 +50,19 @@ class ApprovedMailService:
             payload=mail_approval_payload(request),
             idempotency_key=idempotency_key,
         )
-        return await self._provider.send_email(
+        message_id = await self._provider.send_email(
             request,
             idempotency_key=idempotency_key,
         )
+        if self._crm is not None:
+            try:
+                await self._crm.sync_after_send(request.to)
+            except Exception as exc:
+                logger.warning(
+                    "CRM 发信后同步失败",
+                    extra={"error_type": type(exc).__name__},
+                )
+        return message_id
 
 
 def build_mail_writer_tools(

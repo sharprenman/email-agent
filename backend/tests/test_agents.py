@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from email_agent.agents import (
     CALENDAR_AGENT,
+    CRM_AGENT,
     MAIL_WRITER,
     MAILBOX_READER,
     AgentTaskResult,
@@ -90,7 +91,7 @@ def _tool(runtime, subagent_name: str, tool_name: str):
     return next(tool for tool in spec["tools"] if tool.name == tool_name)
 
 
-def test_runtime_builds_supervisor_and_three_explicit_subagents() -> None:
+def test_runtime_builds_supervisor_and_four_explicit_subagents() -> None:
     runtime, _, _, _, _ = _build_runtime()
 
     assert runtime.agent.name == "email-supervisor"
@@ -98,6 +99,7 @@ def test_runtime_builds_supervisor_and_three_explicit_subagents() -> None:
         MAILBOX_READER,
         MAIL_WRITER,
         CALENDAR_AGENT,
+        CRM_AGENT,
     ]
     assert {tool.name for tool in runtime.main_tools} == {
         "prepare_skill_workflow",
@@ -149,6 +151,7 @@ def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> Non
     reader_tools = runtime.subagent_tool_names(MAILBOX_READER)
     writer_tools = runtime.subagent_tool_names(MAIL_WRITER)
     calendar_tools = runtime.subagent_tool_names(CALENDAR_AGENT)
+    crm_tools = runtime.subagent_tool_names(CRM_AGENT)
 
     assert {
         "read_inbox",
@@ -175,12 +178,20 @@ def test_subagent_business_tool_whitelists_prevent_privilege_escalation() -> Non
         "update_calendar_event",
         "delete_calendar_event",
     }
+    assert crm_tools == {
+        "initialize_crm",
+        "list_crm_contacts",
+        "get_crm_contact",
+        "update_crm_contact",
+    }
     assert runtime.interrupt_on == {
         "save_user_memory": True,
         "send_email": True,
         "create_calendar_event": True,
         "update_calendar_event": True,
         "delete_calendar_event": True,
+        "initialize_crm": True,
+        "update_crm_contact": True,
     }
 
 
