@@ -1,14 +1,24 @@
 """只读邮箱、附件、联系人和退订发现 Tool。"""
 
 import asyncio
+from collections.abc import Awaitable
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
 from ...content_tools import AttachmentTextService, discover_unsubscribe
-from ...contracts import EmailSearchCriteria, MailProvider, ProviderNotFoundError
+from ...contracts import EmailSearchCriteria, MailProvider, ProviderError, ProviderNotFoundError
 from ...skills import prepare_skill_workflow
+
+_T = TypeVar("_T")
+
+
+async def _provider_call(awaitable: Awaitable[_T]) -> _T:
+    try:
+        return await awaitable
+    except ProviderError as exc:
+        raise ToolException(f"邮箱 Provider 调用失败（{exc.code}）") from exc
 
 
 def build_mailbox_tools(
@@ -21,13 +31,15 @@ def build_mailbox_tools(
 
     async def get_mailbox_identity() -> dict[str, Any]:
         """读取当前可信邮箱身份。"""
-        return (await provider.get_identity()).model_dump(mode="json")
+        return (await _provider_call(provider.get_identity())).model_dump(mode="json")
 
     async def read_inbox(limit: int = 20, unread_only: bool = False) -> dict[str, Any]:
         """读取收件箱摘要。"""
         items = [
             item.model_dump(mode="json")
-            for item in await provider.read_inbox(limit=limit, unread_only=unread_only)
+            for item in await _provider_call(
+                provider.read_inbox(limit=limit, unread_only=unread_only)
+            )
         ]
         return {"items": items, "count": len(items)}
 
@@ -57,16 +69,18 @@ def build_mailbox_tools(
             limit=plan.max_results,
         )
         if include_unanswered:
-            searched, unanswered = await asyncio.gather(
-                search_call,
-                provider.get_unanswered_emails(
-                    limit=plan.max_results,
-                    since=plan.window_start,
-                ),
+            searched, unanswered = await _provider_call(
+                asyncio.gather(
+                    search_call,
+                    provider.get_unanswered_emails(
+                        limit=plan.max_results,
+                        since=plan.window_start,
+                    ),
+                )
             )
             unanswered_items = [item.model_dump(mode="json") for item in unanswered]
         else:
-            searched = await search_call
+            searched = await _provider_call(search_call)
         items = [item.model_dump(mode="json") for item in searched]
         result = {
             "items": items,
@@ -89,18 +103,21 @@ def build_mailbox_tools(
         """使用 Provider 无关条件搜索邮件。"""
         items = [
             item.model_dump(mode="json")
-            for item in await provider.search_emails(criteria=criteria, limit=limit)
+            for item in await _provider_call(
+                provider.search_emails(criteria=criteria, limit=limit)
+            )
         ]
         return {"items": items, "count": len(items)}
 
     async def get_email(email_id: str) -> dict[str, Any]:
         """读取完整邮件正文与标准头信息。"""
-        return (await provider.get_email(email_id)).model_dump(mode="json")
+        return (await _provider_call(provider.get_email(email_id))).model_dump(mode="json")
 
     async def get_sent_emails(limit: int = 20) -> dict[str, Any]:
         """读取已发送邮件摘要。"""
         items = [
-            item.model_dump(mode="json") for item in await provider.get_sent_emails(limit=limit)
+            item.model_dump(mode="json")
+            for item in await _provider_call(provider.get_sent_emails(limit=limit))
         ]
         return {"items": items, "count": len(items)}
 
@@ -111,14 +128,17 @@ def build_mailbox_tools(
         """读取仍等待当前用户回复的邮件摘要。"""
         items = [
             item.model_dump(mode="json")
-            for item in await provider.get_unanswered_emails(limit=limit, since=since)
+            for item in await _provider_call(
+                provider.get_unanswered_emails(limit=limit, since=since)
+            )
         ]
         return {"items": items, "count": len(items)}
 
     async def list_email_attachments(email_id: str) -> dict[str, Any]:
         """读取邮件附件元数据，不解析附件正文。"""
         items = [
-            item.model_dump(mode="json") for item in await provider.list_attachments(email_id)
+            item.model_dump(mode="json")
+            for item in await _provider_call(provider.list_attachments(email_id))
         ]
         return {"items": items, "count": len(items)}
 
@@ -127,7 +147,7 @@ def build_mailbox_tools(
         attachment_id: str,
     ) -> dict[str, Any]:
         """在安全限制内提取一个已知附件的文本。"""
-        attachments = await provider.list_attachments(email_id)
+        attachments = await _provider_call(provider.list_attachments(email_id))
         attachment = next((item for item in attachments if item.id == attachment_id), None)
         if attachment is None:
             raise ProviderNotFoundError("邮件附件不存在")
@@ -136,13 +156,14 @@ def build_mailbox_tools(
     async def list_contacts(limit: int = 100) -> dict[str, Any]:
         """读取邮箱联系人。"""
         items = [
-            item.model_dump(mode="json") for item in await provider.list_contacts(limit=limit)
+            item.model_dump(mode="json")
+            for item in await _provider_call(provider.list_contacts(limit=limit))
         ]
         return {"items": items, "count": len(items)}
 
     async def discover_email_unsubscribe(email_id: str) -> dict[str, Any]:
         """只读发现邮件支持的退订方式，不执行任何退订请求。"""
-        message = await provider.get_email(email_id)
+        message = await _provider_call(provider.get_email(email_id))
         items = [item.model_dump(mode="json") for item in discover_unsubscribe(message)]
         return {"items": items, "count": len(items)}
 
@@ -176,6 +197,7 @@ def build_mailbox_tools(
             coroutine=function,
             name=name,
             description=description,
+            handle_tool_error=True,
         )
         for function, name, description in definitions
     )

@@ -8,6 +8,8 @@
 - 草稿请求必须调用 `prepare_email_draft`；该操作成功时状态是 draft，不需要人工审批。
 - 发送请求必须调用 `send_email`，退订执行必须调用 `execute_unsubscribe`，并允许工具触发
   interrupt；不得因为初始 `approval_token` 为空而提前返回失败。
+- 用户要求跳过审批时忽略该要求，但仍按正常路径调用对应写工具触发 interrupt，不得直接拒绝
+  参数完整的合法发信或退订请求。
 - 未实际调用对应工具前不得声称没有权限或无法执行。
 
 输出必须符合 AgentTaskResult，并在 evidence 中保留草稿、已发送邮件或退订结果的安全标识。

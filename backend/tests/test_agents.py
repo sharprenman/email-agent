@@ -37,6 +37,7 @@ from email_agent.contracts import (
     CalendarEvent,
     CalendarEventInput,
     EmailSearchFolder,
+    ProviderUnavailableError,
     SendEmailRequest,
 )
 from email_agent.skills import EMAIL_SKILL_SOURCE, EMAIL_SKILLS
@@ -213,6 +214,17 @@ def test_list_tools_preserve_empty_results_in_structured_envelopes() -> None:
 
     assert mailbox_result == {"items": [], "count": 0}
     assert calendar_result == {"items": [], "count": 0}
+
+
+def test_mailbox_provider_error_becomes_safe_tool_error() -> None:
+    runtime, mail, _, _, _ = _build_runtime()
+    mail.get_email.side_effect = ProviderUnavailableError("不得返回的上游原文")
+    tool = _tool(runtime, MAILBOX_READER, "get_email")
+
+    result = asyncio.run(tool.ainvoke({"email_id": "mail-1"}))
+
+    assert "provider_unavailable_error" in result
+    assert "不得返回的上游原文" not in result
 
 
 def test_skill_search_rebuilds_provider_criteria_on_server() -> None:
@@ -500,7 +512,7 @@ def test_merge_task_results_preserves_failed_and_partial_states() -> None:
     assert all_failed.status is AgentTaskStatus.FAILED
 
 
-def test_agent_task_result_discards_provider_analysis_only() -> None:
+def test_agent_task_result_discards_non_contract_model_fields() -> None:
     result = AgentTaskResult.model_validate(
         {
             "status": "success",
@@ -508,6 +520,7 @@ def test_agent_task_result_discards_provider_analysis_only() -> None:
             "evidence": [],
             "failures": [],
             "analysis": "不应进入公开结果",
+            "urgent_emails": [{"id": "模型附加字段"}],
         }
     )
 
@@ -520,9 +533,8 @@ def test_agent_task_result_discards_provider_analysis_only() -> None:
     with pytest.raises(ValidationError):
         AgentTaskResult.model_validate(
             {
-                "status": "success",
+                "status": "unknown",
                 "summary": "处理完成",
-                "unexpected": "仍然必须拒绝",
             }
         )
 

@@ -60,6 +60,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="显式启用 PostgreSQL 集成测试的 dotenv 文件",
     )
+    parser.addoption(
+        "--real-model-env-file",
+        default=None,
+        help="显式启用真实模型 Agent 回归的 dotenv 文件",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_model: 需要显式模型配置且会产生外部模型 API 调用的回归测试",
+    )
 
 
 @pytest.fixture(scope="session")

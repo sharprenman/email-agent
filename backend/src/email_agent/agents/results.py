@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from ..contracts import ContractModel
 
@@ -19,6 +19,8 @@ class AgentTaskStatus(StrEnum):
 
 class AgentTaskResult(ContractModel):
     """用于跨子代理传递且不会隐藏失败的结构化结果。"""
+
+    model_config = ConfigDict(extra="ignore")
 
     status: AgentTaskStatus
     summary: str = Field(min_length=1, max_length=5000)

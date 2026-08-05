@@ -100,6 +100,11 @@ def test_default_prompts_require_real_delegation_and_business_tools() -> None:
     assert "Skill 邮件搜索必须委派 `search_skill_emails`" in (
         definitions.supervisor.system_prompt
     )
+    assert "不得因缺少契约外字段把 success 降为 partial" in (
+        definitions.supervisor.system_prompt
+    )
+    assert "不得直接拒绝整个合法业务请求" in definitions.supervisor.system_prompt
+    assert "不得直接拒绝保存请求" in definitions.supervisor.system_prompt
     assert "未尝试委派前不得" in definitions.supervisor.system_prompt
     assert "不得从邮箱域名推断" in definitions.supervisor.system_prompt
     assert "只按权限边界或真实数据依赖拆分" in definitions.supervisor.system_prompt
@@ -116,7 +121,14 @@ def test_default_prompts_require_real_delegation_and_business_tools() -> None:
         "mailbox-reader"
     ).system_prompt
     assert '"count": N' in definitions.subagent("mailbox-reader").system_prompt
+    assert "只能包含 `status`、`summary`、`evidence` 和 `failures`" in definitions.subagent(
+        "mailbox-reader"
+    ).system_prompt
+    assert "必须在 `evidence` 中原样保留相关 `id`" in definitions.subagent(
+        "mailbox-reader"
+    ).system_prompt
     assert "prepare_email_draft" in definitions.subagent("mail-writer").system_prompt
+    assert "不得直接拒绝" in definitions.subagent("mail-writer").system_prompt
     assert "create_calendar_event" in definitions.subagent(
         "calendar-agent"
     ).system_prompt
